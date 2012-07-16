@@ -12,14 +12,31 @@
 %% @doc entrypoint for compilation
 do(String) ->
     {ok, _Pid} = compil_table:start_link(),
-    {ok, Tokens, _Lines} = lfe_scan:string(String),
-    {ok, _Count, Tree, _Cont} = lfe_parse:sexpr(Tokens),
+    Trees = lexAndParse(String),
 
     addGlobalEnv(),
-    EnvCode = split_env(Tree, global),
+
+    EnvCodes = lists:map(fun(Tree) ->
+                split_env(Tree, global) end, Trees),
+
 %    NestingFreeCode = clear_names(EnvCode),
     compil_table:stop(),
-    EnvCode.
+    EnvCodes.
+
+
+
+lexAndParse(String) ->
+    {ok, Tokens, _Lines} = lfe_scan:string(String),
+    parseAllForms(Tokens).
+
+parseAllForms(Tokens) ->
+    case lfe_parse:sexpr(Tokens) of
+        {ok, _Count, Tree, []} ->
+            [Tree];
+        {ok, _Count, Tree, Cont} ->
+            [ Tree | parseAllForms(Cont) ]
+    end.
+
 
 
 
@@ -88,7 +105,7 @@ addGlobalEnv() ->
       prefix,
       type,
 	  definitions,
-	  child,
+	  child
 	 }).
 
 -record(call,{
