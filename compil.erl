@@ -17,9 +17,9 @@ do(String) ->
 
     addGlobalEnv(),
     EnvCode = split_env(Tree, global),
-    NestingFreeCode = clear_names(EnvCode),
+%    NestingFreeCode = clear_names(EnvCode),
     compil_table:stop(),
-    NestingFreeCode.
+    EnvCode.
 
 
 
@@ -77,15 +77,18 @@ addGlobalEnv() ->
 -record(name,{
 	  env :: reference(),
 	  name :: string(),
-	  oldName :: atom()
+      buildin :: boolean()
 	 }).
 
--record(env,{
-	  form :: 'let' | 'lambda',
+-record(nameDef, {
+        oldName, name, type }).
+
+-record(lambda, {
 	  ref  :: reference(),
-	  parent,
+      prefix,
+      type,
 	  definitions,
-	  childs
+	  child,
 	 }).
 
 -record(call,{
@@ -95,23 +98,31 @@ addGlobalEnv() ->
 
 
 
-split_env([ 'lambda' | [Bindings | Child]], OldEnv) ->
+split_env([ 'lambda' | [Definitions | Child]], OldEnv) ->
     Ref = make_ref(),
-    compil_table:newEnv(Ref, OldEnv),
-    ScannedDef = lists:map( fun
-            ([Var, Forms]) ->
-                [split_env(Var, Ref), split_env(Forms, Ref)]
-        end, Bindings),
+    Prefix = compil_table:newEnv(Ref, OldEnv),
+    ScannedDef = lists:map(
+        fun (Def) ->
+                NewName= Prefix ++ atom_to_list(Def),
+                compil_table:addMemberEnv(Ref,{Def, NewName}),
+                #nameDef{ oldName = Def, name = NewName }
+        end, Definitions),
     ScannedChild = split_env(Child, Ref),
-    #env{ form = 'let', ref = Ref, childs = [ScannedChild],definitions = ScannedDef };
+    #lambda{ ref = Ref, prefix = Prefix, child = ScannedChild, definitions = ScannedDef };
 
 split_env([ Function | Arguments], Env) ->
     FunctionName = split_env(Function, Env),
     ScannedArguments = lists:map(fun (Thing) ->  split_env(Thing,Env) end, Arguments),
     #call{ function = FunctionName, arguments = ScannedArguments};
 
-split_env(Atom, _Env) when is_atom(Atom) ->
-    #name{ oldName = Atom};
+split_env(Atom, Env) when is_atom(Atom) ->
+    case lists:member(Atom,?BUILDIN) of
+        true ->
+            #name{name=Atom, buildin=true};
+        _   ->
+            {NameEnv, NewName} = lookup_name(Env, Atom),
+            #name{name = NewName, env = NameEnv, buildin=false }
+    end;
 
 %split_env(StringLit) when is_string(StringLit) ->
 %    #literal{ type=string, value=StringLit };
@@ -121,7 +132,18 @@ split_env(BoolLit, _Env) when is_boolean(BoolLit) ->
     #literal{ type=bool, value=BoolLit}.
 
 
-clear_names(
+lookup_name(Env, Name) ->
+    Members  = compil_table:getMembersEnv(Env),
+    case proplists:lookup(Name, Members) of
+        {Name,NewName} ->
+            {Env, NewName};
+        none when Env /= global ->
+            lookup_name(compil_table:getParentEnv(Env), Name);
+        _ ->
+            "Error name not found"
+    end.
+
+
 
 
 %phase2([ 'let' | [Bindings | Form]]) ->

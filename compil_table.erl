@@ -20,26 +20,33 @@
 
 % -- Entries -------------
 
--record(envEntry,{ ref, parent}).
+-record(envEntry,{ ref, parent, members = []}).
 
 % -- API -----------
 
--export([newTemp/0, newEnv/2, getParentEnv/1]).
+-export([newTemp/0]).
+
+-export([newEnv/2, getParentEnv/1, addMemberEnv/2, getMembersEnv/1 ]).
 
 newTemp() ->
     gen_server:call(?MODULE, newTemp).
 
-newUnique(Atom) ->
-    gen_server:call(?MODULE, {newUnique, Atom}).
 
-
-newEnv(Ref,Parent) ->
-    gen_server:call(?MODULE, {store, ?ENV_TABLE, #envEntry{ref = Ref, parent = Parent}}).
+newEnv(Ref, Parent) ->
+    gen_server:call(?MODULE, {store, ?ENV_TABLE, #envEntry{ref = Ref, parent = Parent}}),
+    "Env" ++ gen_server:call(?MODULE, newPrefix).
 
 getParentEnv(Ref) ->
     #envEntry{ parent = Parent } = gen_server:call(?MODULE, {get, ?ENV_TABLE, Ref}),
     Parent.
 
+addMemberEnv(Ref,Member) ->
+    Bla = #envEntry { members = OldMembers} = gen_server:call(?MODULE, {get, ?ENV_TABLE, Ref}),
+    gen_server:call(?MODULE, {store, ?ENV_TABLE, Bla#envEntry{ members=[Member | OldMembers]}}).
+
+getMembersEnv(Ref) ->
+    #envEntry{ members = Members } = gen_server:call(?MODULE, {get, ?ENV_TABLE, Ref}),
+    Members.
 
 % -- Internals -----
 
@@ -64,6 +71,8 @@ init(_Args)->
 
 handle_call(Msg, _From, State = #state{counter=C, rename=RTable}) ->
     case Msg of
+        newPrefix->
+            {reply, integer_to_list(C+100000), State#state{counter=C+1}};
         newTemp ->
             {reply, "%tmp" ++ integer_to_list(C), State#state{counter=C+1}};
         {newUnique,Atom} ->
@@ -74,12 +83,12 @@ handle_call(Msg, _From, State = #state{counter=C, rename=RTable}) ->
 	    end;
         stop ->
 	        {stop, normal, State};
-	{store, Table, Entry} ->
-	    ets:insert(Table, Entry),
-        {reply, ok, State};
-    {get, Table, Key} ->
-        [H|[]] = ets:lookup(Table, Key),
-        H
+	    {store, Table, Entry} ->
+	        ets:insert(Table, Entry),
+            {reply, ok, State};
+        {get, Table, Key} ->
+            [H|[]] = ets:lookup(Table, Key),
+            {reply, H, State}
     end.
 
 handle_cast(Msg, State) ->
