@@ -11,7 +11,9 @@
 
 %% @doc entrypoint for compilation
 do(String) ->
-    {ok, _Pid} = compil_table:start_link(),
+
+    {ok, _} = compil_table:start_link(),
+
     Trees = lexAndParse(String),
 
     addGlobalEnv(),
@@ -20,14 +22,18 @@ do(String) ->
                 split_env(Tree, global) end, Trees),
 
 %    NestingFreeCode = clear_names(EnvCode),
+
+    LLVM = lists:map(fun(Code) ->
+                codegen(Code)  end, EnvCodes),
+
     compil_table:stop(),
-    EnvCodes.
+    io:format(maingen(LLVM)).
 
 
 
 lexAndParse(String) ->
     {ok, Tokens, _Lines} = lfe_scan:string(String),
-    parseAllForms(Tokens).
+    lists:reverse(parseAllForms(Tokens)).
 
 parseAllForms(Tokens) ->
     case lfe_parse:sexpr(Tokens) of
@@ -92,8 +98,8 @@ addGlobalEnv() ->
 -type form() :: #primOp{} | #literal{}.
 
 -record(name,{
-	  env :: reference(),
 	  name :: string(),
+	  env :: reference(),
       buildin :: boolean()
 	 }).
 
@@ -102,20 +108,21 @@ addGlobalEnv() ->
 
 -record(lambda, {
 	  ref  :: reference(),
-      prefix,
+      label,
       type,
 	  definitions,
 	  child
 	 }).
 
 -record(call,{
-	  function,
-	  arguments
+	  target,
+	  arguments,
+      kind
 	 }).
 
 
 
-split_env([ 'lambda' | [Definitions | Child]], OldEnv) ->
+split_env([ 'lambda', Definitions, Child], OldEnv) ->
     Ref = make_ref(),
     Prefix = compil_table:newEnv(Ref, OldEnv),
     ScannedDef = lists:map(
@@ -125,12 +132,12 @@ split_env([ 'lambda' | [Definitions | Child]], OldEnv) ->
                 #nameDef{ oldName = Def, name = NewName }
         end, Definitions),
     ScannedChild = split_env(Child, Ref),
-    #lambda{ ref = Ref, prefix = Prefix, child = ScannedChild, definitions = ScannedDef };
+    #lambda{ ref = Ref, label = Prefix, child = ScannedChild, definitions = ScannedDef };
 
 split_env([ Function | Arguments], Env) ->
-    FunctionName = split_env(Function, Env),
+    Target = split_env(Function, Env),
     ScannedArguments = lists:map(fun (Thing) ->  split_env(Thing,Env) end, Arguments),
-    #call{ function = FunctionName, arguments = ScannedArguments};
+    BasicCall = #call{ target = Target, arguments = ScannedArguments};
 
 split_env(Atom, Env) when is_atom(Atom) ->
     case lists:member(Atom,?BUILDIN) of
@@ -211,6 +218,44 @@ maxType(int,int) ->
 % code gen for the known  type
 
 
+codegen(#lambda{label = Label, definitions=Defs, child = Child}) ->
+    Type = "i32",
+    Header1 = "define " ++ Type ++ " @" ++ Label ++ " ( ",
+    Arguments = lists:map(
+        fun
+            (#nameDef{ name=Name }) -> "i32 %" ++  Name
+        end,Defs),
+    ArgumentStr = string:join(Arguments,", "),
+    Header = Header1 ++ ArgumentStr ++ ") \n {",
+    {ChildVar, ChildCode} = codegen(Child),
+    Footer = "\nret " ++ decodeType(int) ++ " " ++ ChildVar ++ " }\n",
+    io:format(Header ++ ChildCode ++ Footer ++ "\n"),
+    {"@" ++ Label,""};
+
+codegen(#call{ target = Target,  arguments = Args }) ->
+    CodeArgs = lists:map(fun(Arg) ->  codegen(Arg) end, Args),
+    {Vars, ArgCodes}  = lists:unzip(CodeArgs),
+    ArgCode =  string:join(lists:filter( fun (A) -> [] /= A end,ArgCodes), "\n"),
+    case Target of
+        #name{ name='+' } ->
+            MyVar = compil_table:newTemp(),
+            [VarA, VarB] = Vars,
+            MyCode = ArgCode ++  "\n" ++ MyVar ++ " = " ++ decode('+') ++ " " ++ decodeType(int)
+                        ++ " " ++ VarA ++ ", " ++ VarB,
+            {MyVar,MyCode};
+        #lambda{ } = Lambda ->
+            {LambdaVar, _ } = codegen(Lambda),
+            MyVar = compil_table:newTemp(),
+            Vars2 = lists:map( fun(A) -> "i32 " ++ A end, Vars),
+            VarString = string:join(Vars2,", "),
+            MyCode = ArgCode ++ "\n" ++  MyVar ++ " = call i32 "
+                ++ LambdaVar ++ "(" ++ VarString ++ ")",
+            {MyVar, MyCode}
+
+    end;
+codegen(#name{ name=Var}) ->
+    { "%" ++ Var, []};
+
 codegen(Expr) ->
     case Expr of
 	#primOp{op=Op, type=Type, operands={A,B}} ->
@@ -220,15 +265,20 @@ codegen(Expr) ->
 	    MyCode = MyVar ++ " = " ++ decode(Op) ++ " " ++ decodeType(Type) ++ " " ++ VarA ++ ", " ++ VarB,
 	    {MyVar, CodeA ++ CodeB ++ [MyCode]};
 	#literal{type=int, value=Val} ->
-	    MyCode = [],
+	    MyCode = "",
 	    MyVar = integer_to_list(Val),
-	    {MyVar, [MyCode]};
-        #entry{type=Type, form=Form} ->
-            {Var,Code} = codegen(Form),
-            TypeStr = decodeType(Type),
-            MyCode = [ "define " ++ TypeStr ++ " @main () {" ]  ++ Code ++ [ "ret " ++ TypeStr ++ " " ++ Var ++ "\n}"],
-            {"main", MyCode}
-    end.
+	    {MyVar, MyCode}
+end.
+
+
+maingen(Exprs) ->
+    [ Final | Others ] = lists:reverse(Exprs),
+    {_, OtherCode} = lists:unzip(Others),
+    string:join(OtherCode,"\n"),
+    {Var,Code} = Final,
+    TypeStr = decodeType(int),
+    MyCode = "define " ++ TypeStr ++ " @main () {"  ++ OtherCode ++ "\n" ++ Code ++ "\nret " ++ TypeStr ++ " " ++ Var ++ "\n}".
+
 
 
 % Operators
@@ -237,4 +287,4 @@ decode('/') -> "div";
 decode('*') -> "mul";
 decode('-') -> "sub".
 % Types
-decodeType(int) -> "i32". 
+decodeType(int) -> "i32".
