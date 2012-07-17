@@ -34,7 +34,7 @@ newTemp() ->
 
 newEnv(Ref, Parent) ->
     gen_server:call(?MODULE, {store, ?ENV_TABLE, #envEntry{ref = Ref, parent = Parent}}),
-    "Env" ++ gen_server:call(?MODULE, newPrefix).
+    gen_server:call(?MODULE, newPrefix).
 
 getParentEnv(Ref) ->
     #envEntry{ parent = Parent } = gen_server:call(?MODULE, {get, ?ENV_TABLE, Ref}),
@@ -50,7 +50,7 @@ getMembersEnv(Ref) ->
 
 % -- Internals -----
 
--record(state,{counter,rename}).
+-record(state,{counter=0,rename,env_counter=0}).
 
 start_link() ->
     gen_server:start({local, ?MODULE} ,?MODULE ,[] ,[]).
@@ -69,20 +69,18 @@ init(_Args)->
     ets:new(?ENV_TABLE, [set,protected,named_table,{keypos,2}]),
     {ok,#state{rename=Table,counter=0}}.
 
-handle_call(Msg, _From, State = #state{counter=C, rename=RTable}) ->
+handle_call(Msg, _From, State = #state{counter=C, env_counter=E, rename=RTable}) ->
     case Msg of
         newPrefix->
-            {reply, integer_to_list(C+100000), State#state{counter=C+1}};
+            {reply, "env_" ++ integer_to_list(E), State#state{env_counter=E+1}};
         newTemp ->
-            {reply, "%tmp" ++ integer_to_list(C), State#state{counter=C+1}};
+            {reply, "%tmp_" ++ integer_to_list(C), State#state{counter=C+1}};
         {newUnique,Atom} ->
             case ets:lookup(RTable, Atom) of
                 [{Atom, Counter}] ->
                     ets:insert(RTable,{Atom,Counter+1}),
                     {reply, atom_to_list(Atom) ++ integer_to_list(Counter) ++ "_", State}
 	    end;
-        stop ->
-	        {stop, normal, State};
 	    {store, Table, Entry} ->
 	        ets:insert(Table, Entry),
             {reply, ok, State};
@@ -91,6 +89,10 @@ handle_call(Msg, _From, State = #state{counter=C, rename=RTable}) ->
             {reply, H, State}
     end.
 
+
+
+handle_cast(stop, State) ->
+	{stop, normal, State};
 handle_cast(Msg, State) ->
     io:printf("Unexpected cast ~f",[Msg]),
     {noreply, State}.

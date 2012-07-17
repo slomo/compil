@@ -7,33 +7,50 @@
 %% -----------------------------------------------------------------------------
 
 -module(compil).
--export([do/1]).
+-export([do/1, do/2, precompile/1]).
 
 %% @doc entrypoint for compilation
 do(String) ->
-
     {ok, _} = compil_table:start_link(),
+    {ok, _} = compil_emitter:start_link(),
+    Pid = self(),
+    spawn(fun () ->  ?MODULE:do(String, Pid) end),
+    receive
+        done ->
+            ok;
+        Value ->
+            io:format("Got value ~p",Value)
+    after 2000 ->
+            io:format("timeout")
+    end,
+    compil_table:stop(),
+    compil_emitter:stop().
 
+
+
+do(String, Pid) ->
     Trees = lexAndParse(String),
+
+    PrecompiledTrees = lists:map(fun precompile/1, Trees),
 
     addGlobalEnv(),
 
     EnvCodes = lists:map(fun(Tree) ->
-                split_env(Tree, global) end, Trees),
+                split_env(Tree, global) end, PrecompiledTrees),
 
 %    NestingFreeCode = clear_names(EnvCode),
 
-    LLVM = lists:map(fun(Code) ->
-                codegen(Code)  end, EnvCodes),
+    LLVM = lists:map(fun codegen/1, EnvCodes),
 
-    compil_table:stop(),
-    io:format(maingen(LLVM)).
+    compil_emitter:function(maingen(LLVM) ++ "\n"),
+    compil_emitter:to_stdout(),
+    Pid ! done.
 
 
 
 lexAndParse(String) ->
     {ok, Tokens, _Lines} = lfe_scan:string(String),
-    lists:reverse(parseAllForms(Tokens)).
+    parseAllForms(Tokens).
 
 parseAllForms(Tokens) ->
     case lfe_parse:sexpr(Tokens) of
@@ -71,6 +88,15 @@ addGlobalEnv() ->
 -define(PRIMOPS,['+','-','*','/']).
 -define(BUILDIN,?PRIMOPS).
 
+
+%% TODO
+% * analysis of free vars
+% * list implementation
+% * quoat
+% * heap objects for passable clojures ( or maybe not)
+% * introduce structure ( supervisor, writer etc ... )
+% * reactivate type concluder
+% * generalize everything prim op handling
 
 
 -record(primOp,{
@@ -120,6 +146,20 @@ addGlobalEnv() ->
       kind
 	 }).
 
+precompile([ '+' | [ Arg1 | Args ]]) ->
+    lists:foldl(fun(X,Y) ->  [ '+' , Y , precompile(X)] end, precompile(Arg1), Args);
+precompile([ 'let' , Definitions, Child]) ->
+    { FormalArguments, Parameters } = lists:unzip(lists:map( fun erlang:list_to_tuple/1, Definitions)),
+    [
+        [   lambda ,
+            lists:map(fun precompile/1, FormalArguments),
+            precompile(Child)
+        ]
+        | lists:map(fun precompile/1, Parameters) ];
+precompile(List) when is_list(List) ->
+    lists:map(fun  precompile/1,List);
+precompile(Other) ->
+    Other.
 
 
 split_env([ 'lambda', Definitions, Child], OldEnv) ->
@@ -127,7 +167,7 @@ split_env([ 'lambda', Definitions, Child], OldEnv) ->
     Prefix = compil_table:newEnv(Ref, OldEnv),
     ScannedDef = lists:map(
         fun (Def) ->
-                NewName= Prefix ++ atom_to_list(Def),
+                NewName= Prefix ++ "_" ++ atom_to_list(Def),
                 compil_table:addMemberEnv(Ref,{Def, NewName}),
                 #nameDef{ oldName = Def, name = NewName }
         end, Definitions),
@@ -229,7 +269,7 @@ codegen(#lambda{label = Label, definitions=Defs, child = Child}) ->
     Header = Header1 ++ ArgumentStr ++ ") \n {",
     {ChildVar, ChildCode} = codegen(Child),
     Footer = "\nret " ++ decodeType(int) ++ " " ++ ChildVar ++ " }\n",
-    io:format(Header ++ ChildCode ++ Footer ++ "\n"),
+    compil_emitter:function(Header ++ ChildCode ++ Footer ++ "\n"),
     {"@" ++ Label,""};
 
 codegen(#call{ target = Target,  arguments = Args }) ->
@@ -272,12 +312,12 @@ end.
 
 
 maingen(Exprs) ->
-    [ Final | Others ] = lists:reverse(Exprs),
-    {_, OtherCode} = lists:unzip(Others),
-    string:join(OtherCode,"\n"),
-    {Var,Code} = Final,
+    [ Final | _Others ] = lists:reverse(Exprs),
+    {_, Code} = lists:unzip(Exprs),
+    CodeStr = string:join(Code,"\n"),
+    {Var, _} = Final,
     TypeStr = decodeType(int),
-    MyCode = "define " ++ TypeStr ++ " @main () {"  ++ OtherCode ++ "\n" ++ Code ++ "\nret " ++ TypeStr ++ " " ++ Var ++ "\n}".
+    MyCode = "define " ++ TypeStr ++ " @main () {"  ++ CodeStr  ++ "\nret " ++ TypeStr ++ " " ++ Var ++ "\n}".
 
 
 
