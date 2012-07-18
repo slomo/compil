@@ -17,16 +17,20 @@
 
 -define(RENAME_TABLE,compil_rename_table).
 -define(ENV_TABLE,compil_env_table).
+-define(TYPE_TABLE,compil_type_table).
+
 
 % -- Entries -------------
 
 -record(envEntry,{ ref, parent, members = [], free=[]}).
+-record(typeEntry,{ name, guess = [], type }).
 
 % -- API -----------
 
 -export([newTemp/0]).
 
--export([newEnv/2, getParentEnv/1, addMemberEnv/2, getMembersEnv/1 , addFreeEnv/2, getFreeEnv/1 ]).
+-export([newEnv/2, getParentEnv/1, addMemberEnv/2, getMembersEnv/1,
+        addFreeEnv/2, getFreeEnv/1, setType/2, getType/1]).
 
 newTemp() ->
     gen_server:call(?MODULE, newTemp).
@@ -56,6 +60,17 @@ getFreeEnv(Ref) ->
     #envEntry{ free = Free } = gen_server:call(?MODULE, {get, ?ENV_TABLE, Ref}),
     Free.
 
+setType(Name,Type) ->
+    gen_server:call(?MODULE, {store, ?TYPE_TABLE, #typeEntry{name=Name, type=Type}}).
+
+getType(Name) ->
+    case gen_server:call(?MODULE, {get, ?TYPE_TABLE, Name}) of
+        #typeEntry{ type = Type} ->
+            Type;
+        _ ->
+            undefined
+    end.
+
 % -- Internals -----
 
 -record(state,{counter=0,rename,env_counter=0}).
@@ -75,6 +90,7 @@ stop() ->
 init(_Args)->
     Table = ets:new(?RENAME_TABLE, [set,protected,named_table]),
     ets:new(?ENV_TABLE, [set,protected,named_table,{keypos,2}]),
+    ets:new(?TYPE_TABLE, [set,protected,named_table,{keypos,2}]),
     {ok,#state{rename=Table,counter=0}}.
 
 handle_call(Msg, _From, State = #state{counter=C, env_counter=E, rename=RTable}) ->
@@ -93,8 +109,13 @@ handle_call(Msg, _From, State = #state{counter=C, env_counter=E, rename=RTable})
 	        ets:insert(Table, Entry),
             {reply, ok, State};
         {get, Table, Key} ->
-            [H|[]] = ets:lookup(Table, Key),
-            {reply, H, State}
+            Ret = case ets:lookup(Table, Key) of
+                [H|[]] ->
+                    H;
+                [] ->
+                    undefined
+            end,
+            {reply, Ret, State}
     end.
 
 
