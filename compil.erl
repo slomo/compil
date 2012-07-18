@@ -90,10 +90,11 @@ addGlobalEnv() ->
 
 
 %% TODO
-% * analysis of free vars
 % * list implementation
 % * quoat
 % * heap objects for passable clojures ( or maybe not)
+%   * lambda lifting is needed
+%   * analysis of free vars
 % * introduce structure ( supervisor, writer etc ... )
 % * reactivate type concluder
 % * generalize everything prim op handling
