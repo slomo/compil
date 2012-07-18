@@ -1,4 +1,12 @@
--module(compil_emitter).
+%% -----------------------------------------------------------------------------
+%% @author Yves Müller <myves.addAnAt.zedat.fu-berlin.de>
+%% @copyright Simplified BSD License by Yves Müller, 2012
+%% @title compil_emitter.erl
+%% @doc The code emitter for the compil compiler
+%% @version 0.0.1
+%% -----------------------------------------------------------------------------
+-
+module(compil_emitter).
 -behaviour(gen_server).
 
 -export([start_link/0, stop/0]).
