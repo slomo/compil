@@ -20,13 +20,13 @@
 
 % -- Entries -------------
 
--record(envEntry,{ ref, parent, members = []}).
+-record(envEntry,{ ref, parent, members = [], free=[]}).
 
 % -- API -----------
 
 -export([newTemp/0]).
 
--export([newEnv/2, getParentEnv/1, addMemberEnv/2, getMembersEnv/1 ]).
+-export([newEnv/2, getParentEnv/1, addMemberEnv/2, getMembersEnv/1 , addFreeEnv/2, getFreeEnv/1 ]).
 
 newTemp() ->
     gen_server:call(?MODULE, newTemp).
@@ -47,6 +47,14 @@ addMemberEnv(Ref,Member) ->
 getMembersEnv(Ref) ->
     #envEntry{ members = Members } = gen_server:call(?MODULE, {get, ?ENV_TABLE, Ref}),
     Members.
+
+addFreeEnv(Ref, Name) ->
+    Bla = #envEntry { free = Free} = gen_server:call(?MODULE, {get, ?ENV_TABLE, Ref}),
+    gen_server:call(?MODULE, {store, ?ENV_TABLE, Bla#envEntry{ free=[ Name | Free]}}).
+
+getFreeEnv(Ref) ->
+    #envEntry{ free = Free } = gen_server:call(?MODULE, {get, ?ENV_TABLE, Ref}),
+    Free.
 
 % -- Internals -----
 

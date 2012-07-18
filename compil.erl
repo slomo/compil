@@ -9,6 +9,7 @@
 -module(compil).
 -export([do/1, do/2, precompile/1]).
 
+
 %% @doc entrypoint for compilation
 do(String) ->
     {ok, _} = compil_table:start_link(),
@@ -38,9 +39,12 @@ do(String, Pid) ->
     EnvCodes = lists:map(fun(Tree) ->
                 split_env(Tree, global) end, PrecompiledTrees),
 
-%    NestingFreeCode = clear_names(EnvCode),
 
-    LLVM = lists:map(fun codegen/1, EnvCodes),
+    lists:map(fun (Code) -> scan_free(Code, global) end, EnvCodes),
+
+    ClosedCodes = lists:map(fun close_var/1, EnvCodes),
+
+    LLVM = lists:map(fun codegen/1, ClosedCodes),
 
     compil_emitter:function(maingen(LLVM) ++ "\n"),
     compil_emitter:to_stdout(),
@@ -135,9 +139,10 @@ addGlobalEnv() ->
 
 -record(lambda, {
 	  ref  :: reference(),
-      label,
+      label :: string(),
       type,
 	  definitions,
+      free_vars, % { var name, new boundname }
 	  child
 	 }).
 
@@ -146,6 +151,10 @@ addGlobalEnv() ->
 	  arguments,
       kind
 	 }).
+
+
+%% precompiler 
+
 
 precompile([ '+' | [ Arg1 | Args ]]) ->
     lists:foldl(fun(X,Y) ->  [ '+' , Y , precompile(X)] end, precompile(Arg1), Args);
@@ -162,6 +171,8 @@ precompile(List) when is_list(List) ->
 precompile(Other) ->
     Other.
 
+
+%% renaming of functions
 
 split_env([ 'lambda', Definitions, Child], OldEnv) ->
     Ref = make_ref(),
@@ -209,7 +220,56 @@ lookup_name(Env, Name) ->
     end.
 
 
+%% free variables analysis
 
+scan_free(#lambda{ child=Child, ref=Ref }, _ParentRef) ->
+    scan_free(Child, Ref);
+scan_free(#name{ buildin = true }, Ref) ->
+    done;
+scan_free(#name{ name = Name}, Ref) ->
+    add_free_var(Ref, Name) ;
+scan_free(#call{ target = Target, arguments = Arguments}, Ref) ->
+    scan_free(Target,Ref),
+    lists:map(fun (Arg) -> scan_free(Arg,Ref) end, Arguments),
+    done;
+scan_free(_Other, _Env) ->
+    done.
+
+
+add_free_var(Ref,Name) ->
+    { _ , Members }  = lists:unzip(compil_table:getMembersEnv(Ref)),
+    Free = compil_table:getFreeEnv(Ref),
+    case {lists:member(Name, Members), lists:member(Name, Free)} of 
+        {false, _ } when Ref =:= global ->
+            io:format("Error name not found: " ++ Name);
+        {false, false} ->
+            compil_table:addFreeEnv(Ref,Name),
+            ParentRef = compil_table:getParentEnv(Ref),
+            add_free_var(ParentRef, Name);
+        {_, _} ->
+            done
+    end.
+    
+
+
+
+
+
+%% close all vars
+
+close_var(Call = #call{ target=(Target = #lambda{ ref = Ref, definitions = Defs, 
+                child=Child }) , arguments = Args})  ->
+    Free = compil_table:getFreeEnv(Ref),
+    FreeDefs = lists:map(fun(Name) -> #nameDef{name=Name} end, Free),
+    NewChild = close_var(Child),
+    NewTarget = Target#lambda{definitions = Defs ++ FreeDefs, child=NewChild},
+    NewArguments = lists:map( fun close_var/1, Args),
+    FreeArguments = lists:map(fun(Var) -> #name{name=Var} end, Free), 
+    Call#call{ target=NewTarget, arguments=NewArguments ++ FreeArguments };
+close_var(Call = #call{ arguments = Args}) ->
+    Call#call{ arguments = lists:map( fun close_var/1, Args)};
+close_var(Other) ->
+    Other.
 
 %phase2([ 'let' | [Bindings | Form]]) ->
 %    Definitons = lists:map(fun ([ Name, Form ]) when is_atom(Def) ->
