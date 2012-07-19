@@ -7,13 +7,10 @@
 %% -----------------------------------------------------------------------------
 
 -module(compil).
--export([do/1, do/2, precompile/1]).
+-export([do/1, do/2, fromFileToFile/2]).
 
 
-%% @doc entrypoint for compilation
-do(String) ->
-    {ok, _} = compil_table:start_link(),
-    {ok, _} = compil_emitter:start_link(),
+runAsProcess(String) ->
     Pid = self(),
     spawn(fun () ->  ?MODULE:do(String, Pid) end),
     receive
@@ -22,10 +19,34 @@ do(String) ->
         Value ->
             io:format("Got value ~p",Value)
     after 2000 ->
-            io:format("timeout")
-    end,
+            io:format("timeout"),
+            timeout
+    end.
+
+%% @doc entrypoint for compilation
+do(String) ->
+    {ok, _} = compil_table:start_link(),
+    {ok, _} = compil_emitter:start_link(),
+    runAsProcess(String),
+    compil_emitter:to_stdout(),
     compil_table:stop(),
     compil_emitter:stop().
+
+
+fromFileToFile(SourceFileName, TargetFileName) ->
+    {ok, String} = file:read_file(SourceFileName),
+    {ok, _} = compil_table:start_link(),
+    {ok, _} = compil_emitter:start_link(),
+    case runAsProcess(binary_to_list(String)) of
+        ok ->
+            compil_emitter:to_file(TargetFileName),
+            compil_table:stop(),
+            compil_emitter:stop();
+        timeout ->
+            compil_table:stop(),
+            compil_emitter:stop(),
+            throw(compil_error)
+    end.
 
 
 
@@ -45,14 +66,10 @@ do(String, Pid) ->
     ClosedCodes = lists:map(fun close_var/1, EnvCodes),
 
     TypedCodes = lists:map(fun type/1, ClosedCodes),
-    io:write(TypedCodes),
-    io:format("\n------\n"),
-
 
     LLVM = lists:map(fun codegen/1, TypedCodes),
 
     compil_emitter:function(maingen(LLVM) ++ "\n"),
-    compil_emitter:to_stdout(),
     Pid ! done.
 
 
@@ -68,8 +85,6 @@ parseAllForms(Tokens) ->
         {ok, _Count, Tree, Cont} ->
             [ Tree | parseAllForms(Cont) ]
     end.
-
-
 
 addGlobalEnv() ->
     compil_table:newEnv(global, undefined).
@@ -96,12 +111,12 @@ addGlobalEnv() ->
 -define(BUILDIN,?PRIMOPS).
 
 
-%% TODO
+%% TODO:
 % * list implementation
 % * quoat
 % * heap objects for passable clojures
-% * reactivate type concluder
 % * generalize everything prim op handling
+% * test structure to run over examples
 
 -record(literal,{
           type :: systemType(),

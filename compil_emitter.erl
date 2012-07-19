@@ -22,7 +22,7 @@ function(Code) ->
 
 to_file(Filename) ->
     Content = gen_server:call(?MODULE, return_all),
-    file:write(Filename,<<Content>>).
+    file:write_file(Filename, list_to_binary(Content)).
 
 to_stdout() ->
     Content = gen_server:call(?MODULE, return_all),
