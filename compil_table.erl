@@ -33,7 +33,7 @@
         addFreeEnv/2, getFreeEnv/1, setType/2, getType/1]).
 
 newTemp() ->
-    gen_server:call(?MODULE, newTemp).
+    "%" ++ gen_server:call(?MODULE, newTemp).
 
 
 newEnv(Ref, Parent) ->
@@ -98,7 +98,7 @@ handle_call(Msg, _From, State = #state{counter=C, env_counter=E, rename=RTable})
         newPrefix->
             {reply, "env_" ++ integer_to_list(E), State#state{env_counter=E+1}};
         newTemp ->
-            {reply, "%tmp_" ++ integer_to_list(C), State#state{counter=C+1}};
+            {reply, "tmp_" ++ integer_to_list(C), State#state{counter=C+1}};
         {newUnique,Atom} ->
             case ets:lookup(RTable, Atom) of
                 [{Atom, Counter}] ->

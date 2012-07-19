@@ -50,8 +50,10 @@ stop() ->
 init(_Args) ->
     {ok, #state{}}.
 
-handle_call(return_all, _From, State = #state{ functions=Functions} ) ->
-    {reply, string:join(lists:reverse(Functions),"\n\n"), State};
+handle_call(return_all, _From, State = #state{ functions=ReversedFunctions} ) ->
+    Functions = lists:reverse(ReversedFunctions),
+    Code = string:join(Functions, "\n\n"),
+    {reply, Code, State};
 handle_call({function,Code}, _From, State = #state{ functions=Functions} ) ->
     {reply, ok, State#state{functions=[Code | Functions]}}.
 

@@ -346,72 +346,73 @@ buildin_type('+') ->
     #typeFun{arguments=[int, int], return=int}.
 
 
+-define(NOCODE,[]).
+-define(LIN(Tokens), string:join(Tokens," ")).
+-define(FUNCTION(Lines), hd(Lines) ++ "{\n\t" ++ string:join(tl(Lines),"\n\t") ++ "\n}\n").
 
 % code gen for the known  type
 codegen(#lambda{label = Label, definitions=Defs, child = Child}) ->
-    Type = "i32",
-    Header1 = "define " ++ Type ++ " @" ++ Label ++ " ( ",
+    RetType = edt(Child),
     Arguments = lists:map(
-        fun
-            (#nameDef{ name=Name }) -> "i32 %" ++  Name
-        end,Defs),
-    ArgumentStr = string:join(Arguments,", "),
-    Header = Header1 ++ ArgumentStr ++ ") \n {",
-    {ChildVar, ChildCode} = codegen(Child),
-    Footer = "\nret " ++ decodeType(int) ++ " " ++ ChildVar ++ " }\n",
-    compil_emitter:function(Header ++ ChildCode ++ Footer ++ "\n"),
+        fun (#nameDef{ name=Name, type=Type }) -> lists:concat([decode_type(Type), " %", Name]) end,
+        Defs),
+    {ChildVar, ChildLines} = codegen(Child),
+    HeaderLine = ?LIN(["define", RetType, "@" ++ Label, "(", string:join(Arguments,", "), ")"]),
+    ReturnLine = ?LIN(["ret", RetType, ChildVar]),
+    Code = ?FUNCTION([ HeaderLine | lists:reverse(ChildLines) ] ++ [ ReturnLine ]),
+    compil_emitter:function(Code),
     {"@" ++ Label,""};
 
-codegen(#call{ target = Target,  arguments = Args }) ->
+codegen(#call{ type=RetType, target = Target,  arguments = Args }) ->
     CodeArgs = lists:map(fun(Arg) ->  codegen(Arg) end, Args),
     {Vars, ArgCodes}  = lists:unzip(CodeArgs),
-    ArgCode =  string:join(lists:filter( fun (A) -> [] /= A end,ArgCodes), "\n"),
+    ArgCodeLines =  lists:concat(ArgCodes),
     case Target of
         #name{ name='+' } ->
             MyVar = compil_table:newTemp(),
             [VarA, VarB] = Vars,
-            MyCode = ArgCode ++  "\n" ++ MyVar ++ " = " ++
-                decode('+') ++ " " ++ decodeType(int)
-                        ++ " " ++ VarA ++ ", " ++ VarB,
-            {MyVar,MyCode};
-        #lambda{ } = Lambda ->
+            MyOp = ?LIN([MyVar,"=", decode('+'), decode_type(RetType), VarA,",",VarB]),
+            {MyVar, [ MyOp | ArgCodeLines ]};
+        #lambda{ type=#typeFun {arguments=ArgTypes} } = Lambda ->
             {LambdaVar, _ } = codegen(Lambda),
             MyVar = compil_table:newTemp(),
-            Vars2 = lists:map( fun(A) -> "i32 " ++ A end, Vars),
-            VarString = string:join(Vars2,", "),
-            MyCode = ArgCode ++ "\n" ++  MyVar ++ " = call i32 "
-                ++ LambdaVar ++ "(" ++ VarString ++ ")",
-            {MyVar, MyCode};
-        #name{ name=Name, buildin=false } ->
+            ArgsStr = lists:map( fun({Var, Type}) -> decode_type(Type) ++ " " ++  Var end, lists:zip(Vars, ArgTypes)),
+            VarString = string:join(ArgsStr,", "),
+            MyCall = ?LIN([MyVar,"=","call",decode_type(RetType), LambdaVar, "(", VarString ,")"]),
+            {MyVar, [ MyCall | ArgCodeLines ]};
+        #name{ name=Name, buildin=false } -> % TODO: clojure call
             MyVar = compil_table:newTemp(),
             Vars2 = lists:map( fun(A) -> "i32 " ++ A end, Vars),
             VarString = string:join(Vars2,", "),
-            MyCode = ArgCode ++ "\n" ++  MyVar ++ " = call i32 %"
-                ++ Name ++ "(" ++ VarString ++ ")",
+            MyCode = [ ?LIN([MyVar, "= call i32 %",Name,"(",VarString,")"]) | ArgCodeLines ],
             {MyVar, MyCode}
     end;
 
 codegen(#name{ name=Var}) ->
-    { "%" ++ Var, []};
+    { "%" ++ Var, ?NOCODE};
 
 codegen(#closure{ lambda = Lambda, captures= _Captures }) ->
     { _FunctionName, _ } = codegen(Lambda);
 
 codegen(#literal{type=int, value=Val}) ->
-    MyCode = "",
     MyVar = integer_to_list(Val),
-    {MyVar, MyCode}.
+    {MyVar, ?NOCODE}.
 
 
 maingen(Exprs) ->
-    [ Final | _Others ] = lists:reverse(Exprs),
+    Final = lists:last(Exprs),
     {_, Code} = lists:unzip(Exprs),
-    CodeStr = string:join(Code,"\n"),
-    {Var, _} = Final,
-    TypeStr = decodeType(int),
-    "define " ++ TypeStr ++ " @main () {"
-        ++ CodeStr  ++ "\nret " ++ TypeStr ++ " " ++ Var ++ "\n}".
+    Lines = lists:concat(lists:map(fun lists:reverse/1, Code)),
+    {FinalVar, FinalCode} = Final,
+    RetType = decode_type(int), % defined to be int, other make no sense
 
+    ?FUNCTION(
+            [ ?LIN([ "define", RetType, "@main", "()"]) | Lines ] ++
+            [ ?LIN(["ret", RetType, FinalVar]) ]
+    ).
+
+
+edt(Expr) -> decode_type(extract_type(Expr)).
 
 
 % Operators
@@ -419,5 +420,9 @@ decode('+') -> "add";
 decode('/') -> "div";
 decode('*') -> "mul";
 decode('-') -> "sub".
+
+
 % Types
-decodeType(int) -> "i32".
+decode_type(#typeFun{return=Return,arguments=Args}) ->
+    decode_type(Args) ++ "(" ++ strings:join(lists:map(fun decode_type/1, Args),",") ++ ")";
+decode_type(int) -> "i32".
