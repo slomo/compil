@@ -119,7 +119,7 @@ addGlobalEnv() ->
 %                end,"", PreCode)).
 
 -define(PRIMOPS,['+','-','*','/']).
--define(BUILDIN,?PRIMOPS).
+-define(BUILDIN,?PRIMOPS ++ ['cond']).
 
 -record(literal,{
           type :: systemType(),
@@ -197,6 +197,11 @@ split_env([ Function | Arguments], Env) ->
     ScannedArguments = lists:map(fun (Thing) ->  split_env(Thing,Env) end, Arguments),
     #call{ target = Target, arguments = ScannedArguments};
 
+split_env(IntLit, _Env) when is_integer(IntLit) ->
+    #literal{ type=int, value=IntLit };
+split_env(BoolLit, _Env) when is_boolean(BoolLit) ->
+    #literal{ type=bool, value=BoolLit};
+
 split_env(Atom, Env) when is_atom(Atom) ->
     case lists:member(Atom,?BUILDIN) of
         true ->
@@ -204,14 +209,10 @@ split_env(Atom, Env) when is_atom(Atom) ->
         _   ->
             {NameEnv, NewName} = lookup_name(Env, Atom),
             #name{name = NewName, env = NameEnv, buildin=false }
-    end;
+    end.
 
 %split_env(StringLit) when is_string(StringLit) ->
 %    #literal{ type=string, value=StringLit };
-split_env(IntLit, _Env) when is_integer(IntLit) ->
-    #literal{ type=int, value=IntLit };
-split_env(BoolLit, _Env) when is_boolean(BoolLit) ->
-    #literal{ type=bool, value=BoolLit}.
 
 
 lookup_name(Env, Name) ->
@@ -321,6 +322,15 @@ type(#lambda{definitions = Definitions, child = Child} = Lambda) ->
     MyType = #typeFun{return=extract_type(TypedChild), arguments=ArgTypes},
     Lambda#lambda{definitions=TypedDefinitions, child=TypedChild, type=MyType};
 
+type(#call{ target=Target=#name{name='cond' }, arguments=[Cond, Left, Right]} = Expr) ->
+    TypedCond = ensure_type(Cond,bool),
+    TypedLeft = type(Left),
+    ExpectedType = extract_type(Left),
+    TypedRight = ensure_type(Right, ExpectedType),
+    TypedTarget = Target#name{ type=#typeFun{ arguments = [ bool, ExpectedType, ExpectedType ], return = ExpectedType}},
+    Expr#call{ type=ExpectedType, target=TypedTarget, arguments = [ TypedCond, TypedLeft, TypedRight ]};
+
+
 type(#call{ target=Target, arguments=Arguments} = Call ) ->
     TypedTarget = type(Target),
     case extract_type(TypedTarget) of
@@ -330,6 +340,7 @@ type(#call{ target=Target, arguments=Arguments} = Call ) ->
             TypedArguments = type_check_args(Arguments, lists:subtract(ExpectedArgTypes, CaptureTypes))
     end,
     Call#call{ target = TypedTarget, arguments=TypedArguments, type=ReturnType};
+
 
 type(#name{name=Name, buildin=true} = Expr) ->
     Expr#name{type=buildin_type(Name)};
@@ -381,6 +392,7 @@ buildin_type('+') ->
 -define(NOCODE,[]).
 -define(LIN(Tokens), string:join(Tokens," ")).
 -define(FUNCTION(Lines), hd(Lines) ++ "{\n\t" ++ string:join(tl(Lines),"\n\t") ++ "\n}\n").
+-define(LABEL(Name),"\n" ++ tl(Name) ++ ":").
 
 % code gen for the known  type
 codegen(#lambda{label = Label, definitions=Defs, child = Child}) ->
@@ -394,6 +406,35 @@ codegen(#lambda{label = Label, definitions=Defs, child = Child}) ->
     Code = ?FUNCTION([ HeaderLine | lists:reverse(ChildLines) ] ++ [ ReturnLine ]),
     compil_emitter:function(Code),
     {"@" ++ Label,""};
+
+codegen(#call{ target=Target=#name{name='cond' }, arguments=[Cond, Left, Right]}) ->
+    {CondVar, CondCodes } = codegen(Cond),
+    {TrueVar, TrueCodes } = codegen(Left),
+    {FalseVar, FalseCodes } = codegen(Right),
+
+    LabelTrue = compil_table:newTemp(),
+    LabelFalse = compil_table:newTemp(),
+    LabelContinue = compil_table:newTemp(),
+
+    Pointer = compil_table:newTemp(),
+    MyVar = compil_table:newTemp(),
+
+    AllocCode = ?LIN([Pointer,"=","alloca","i32"]),
+    BranchCode = ?LIN(["br i1",CondVar++",","label",LabelTrue ++ ",","label",LabelFalse  ] ),
+    LabelTrueCode = ?LABEL(LabelTrue),
+    StoreTrueCode = ?LIN(["store","i32",TrueVar++",","i32*",Pointer]),
+    ContinueCode  = ?LIN(["br","label",LabelContinue]),
+    LabelContinueCode = ?LABEL(LabelContinue),
+    LabelFalseCode = ?LABEL(LabelFalse),
+    StoreFalseCode = ?LIN(["store","i32",FalseVar++",","i32*",Pointer]),
+
+    LoadCode = ?LIN([MyVar,"=","load","i32*",Pointer]),
+
+    {MyVar, lists:reverse(CondCodes ++ [AllocCode, BranchCode] ++
+            [LabelTrueCode | TrueCodes] ++
+            [ StoreTrueCode | [ContinueCode | [LabelFalseCode | FalseCodes]]] ++
+            [StoreFalseCode, ContinueCode,  LabelContinueCode, LoadCode ])};
+
 
 codegen(#call{ type=RetType, target = Target,  arguments = Args }) ->
 
@@ -488,8 +529,15 @@ codegen(#closure{ lambda = Lambda = #lambda { type=FunType },type = ClType,  cap
 
 codegen(#literal{type=int, value=Val}) ->
     MyVar = integer_to_list(Val),
+    {MyVar, ?NOCODE};
+codegen(#literal{type=bool, value=Val}) ->
+    MyVar = case Val of
+        true ->
+            "1";
+        false ->
+            "0"
+    end,
     {MyVar, ?NOCODE}.
-
 
 emit_closure_struct(#typeCl{ name=ClosureTypeName, lambda=TypeFun, captures=CaptureTypes }) ->
     ArgTypesString = string:join(lists:map(fun decode_type/1,CaptureTypes),", "),
@@ -523,4 +571,5 @@ decode('-') -> "sub".
 decode_type(#typeFun{return=Return,arguments=Args}) ->
     decode_type(Return) ++ "(" ++ string:join(lists:map(fun decode_type/1, Args),", ") ++ ")*";
 decode_type(#typeCl{ name=Name}) -> "%" ++ Name ++ "*";
+decode_type(bool) -> "i1";
 decode_type(int) -> "i32".
