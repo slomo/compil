@@ -9,6 +9,17 @@
 -module(compil).
 -export([do/1, do/2, fromFileToFile/2]).
 
+%% TODO:
+% * list implementation
+% * quote
+% * closure
+%   * remove hacks ( make size adjustable)
+%   * rework code
+%   * ( rather store on head, than in stackframe)
+% * generalize everything prim op handling
+
+%% Problems:
+% * when shall i free the allocated storage for closures
 
 runAsProcess(String) ->
     Pid = self(),
@@ -110,13 +121,6 @@ addGlobalEnv() ->
 -define(PRIMOPS,['+','-','*','/']).
 -define(BUILDIN,?PRIMOPS).
 
-
-%% TODO:
-% * list implementation
-% * quote
-% * heap objects for passable clojures
-% * generalize everything prim op handling
-
 -record(literal,{
           type :: systemType(),
           value :: any()
@@ -157,7 +161,6 @@ addGlobalEnv() ->
 }).
 
 %% precompiler
-
 
 precompile([ '+' | [ Arg1 | Args ]]) ->
     lists:foldl(fun(X,Y) ->  [ '+' , Y , precompile(X)] end, precompile(Arg1), Args);
@@ -259,8 +262,6 @@ add_free_var(Ref,Name) ->
 
 %% close all vars
 
-
-
 close_var(Call = #call{ target=(Target = #lambda{ ref = Ref, definitions = Defs,
                 child=Child }) , arguments = Args})  ->
     Free = compil_table:getFreeEnv(Ref),
@@ -270,8 +271,8 @@ close_var(Call = #call{ target=(Target = #lambda{ ref = Ref, definitions = Defs,
     NewArguments = lists:map( fun close_var/1, Args),
     FreeArguments = lists:map(fun(Var) -> #name{name=Var} end, Free),
     Call#call{ target=NewTarget, arguments=NewArguments ++ FreeArguments };
+
 close_var(Call = #call{ arguments = Args, target=Target}) ->
-    % TODO: close also the target? Enabled for testing purpose
     Call#call{ target =  close_var(Target), arguments = lists:map( fun close_var/1, Args)};
 
 close_var(Lambda = #lambda{ ref=Ref, definitions=Defs, child=Child}) ->
@@ -290,7 +291,10 @@ close_var(Other) ->
 % types
 
 -record(typeFun,{arguments=[],return}).
--record(typeCl,{lambda,captures=[]}).
+
+% This record represents a clsoure type. The name fild, is the type name
+% later on choosen for the struct, representing this closure
+-record(typeCl,{lambda,name,captures=[]}).
 
 type(#closure{lambda=Lambda, captures=Captures} = Closure) ->
     TypedLambda = type(Lambda),
@@ -300,7 +304,11 @@ type(#closure{lambda=Lambda, captures=Captures} = Closure) ->
                 Type = compil_table:getType(Name),
                 {Def#name{type=Type},Type}
         end, Captures)),
-    Closure#closure{ type=#typeCl{ lambda = TypedLambda#lambda.type, captures=CaptureTypes }, lambda=TypedLambda, captures=TypedCaptures };
+    Closure#closure{ type=#typeCl{
+            name= "clojure_" ++ Lambda#lambda.label,
+            lambda = TypedLambda#lambda.type,
+            captures=CaptureTypes },
+        lambda=TypedLambda, captures=TypedCaptures };
 
 type(#lambda{definitions = Definitions, child = Child} = Lambda) ->
     TypedChild = type(Child),
@@ -406,28 +414,37 @@ codegen(#call{ type=RetType, target = Target,  arguments = Args }) ->
             MyCall = ?LIN([MyVar,"=","call",decode_type(RetType), LambdaVar, "(", VarString ,")"]),
             {MyVar, [ MyCall | ArgCodeLines ]};
         Other -> % callee must be a closure
-            ClType = #typeCl{ } = extract_type(Other),
-            % FIXME: dropping importand code (if the other was a function eg)
+            ClType = #typeCl{ lambda=FunType = #typeFun{ arguments=ArgTypes }, captures=CaptureTypes } = extract_type(Other),
             { StructPointer, PrevCodes} = codegen(Other),
 
             FunctionPointerPointer = compil_table:newTemp(),
             FunctionPointer = compil_table:newTemp(),
-            BindPointer = compil_table:newTemp(),
-            Binding = compil_table:newTemp(),
 
             ComputeFPPCode = ?LIN([FunctionPointerPointer,"=","getelementptr", decode_type(ClType),StructPointer ++ ",","i32 0,","i32 0"]),
-            ComputeBPCode = ?LIN([BindPointer,"=","getelementptr",decode_type(ClType),StructPointer ++ ",","i32 0,","i32 2"]),
+            LoadFPCode = ?LIN([FunctionPointer,"=","load",decode_type(FunType)++"*",FunctionPointerPointer]),
 
-            LoadFPCode = ?LIN([FunctionPointer,"=","load","i32(i32,i32)**",FunctionPointerPointer]),
-            LoadBCode = ?LIN([Binding,"=","load","i32*",BindPointer]),
+            {BindVars, BindCodes} = lists:unzip(lists:map(
+                fun
+                    ({ Type, Num}) ->
+                        BindPointer = compil_table:newTemp(),
+                        Binding = compil_table:newTemp(),
+                        NumStr = integer_to_list(Num),
 
-            % FIXME: dirty hack [int]
-            ArgsStr = lists:map( fun({Var, Type}) -> decode_type(Type) ++ " " ++  Var end, lists:zip(Vars, [int])),
+                        ComputeBPCode = ?LIN([BindPointer,"=","getelementptr",decode_type(ClType),StructPointer ++ ",","i32 0,","i32",NumStr]),
+                        LoadBCode = ?LIN([Binding,"=","load",decode_type(Type) ++ "*",BindPointer]),
+
+                        {Binding ,[ComputeBPCode, LoadBCode]}
+
+                end,
+                lists:zip(CaptureTypes,lists:seq(1, length(CaptureTypes))))),
+            BindCode = lists:concat(BindCodes),
+
+            ArgsStr = lists:map( fun({Var, Type}) -> decode_type(Type) ++ " " ++  Var end, lists:zip(Vars ++ BindVars, ArgTypes)),
             VarString = string:join(ArgsStr,", "),
             MyVar = compil_table:newTemp(),
-            CallCode = ?LIN([MyVar,"=","call",decode_type(RetType),FunctionPointer,"(",VarString,", i32",Binding,")"]),
+            CallCode = ?LIN([MyVar,"=","call",decode_type(RetType),FunctionPointer,"(",VarString,")"]),
 
-            { MyVar, lists:reverse([ComputeFPPCode,ComputeBPCode,LoadFPCode,LoadBCode,CallCode]) ++ PrevCodes }
+            { MyVar, lists:reverse(BindCodes ++ [ComputeFPPCode,LoadFPCode,CallCode]) ++ PrevCodes }
 
     end;
 
@@ -435,28 +452,36 @@ codegen(#name{ name=Var}) ->
     { "%" ++ Var, ?NOCODE};
 
 
-% TODO:
-% * introduce clojure type
-% * parameterize for different sizes of bindings
-% * write cll code for clojure
-
-codegen(#closure{ lambda = Lambda = #lambda { type=Type },type = ClType,  captures=  [ #name{name=CaptureName, type=CaptureType }]}) ->
+codegen(#closure{ lambda = Lambda = #lambda { type=FunType },type = ClType,  captures= Captures}) ->
     { FunctionName, _ } = codegen(Lambda),
     % Typedef := { Pointer to Function, Number of Bindings, Binding }
-    compil_emitter:function(?LIN(["%closure","=","type","{","i32(i32,i32)*,", "i32,","i32","}"])),
     StructPointer = compil_table:newTemp(),
     FunctionPointer = compil_table:newTemp(),
 
-    ClojureStructType = decode_type(ClType),
-    AllocCode = ?LIN([StructPointer,"=","alloca","%closure"]),
-    GetFPCode = ?LIN([FunctionPointer,"=","getelementptr",ClojureStructType,StructPointer++ ",","i32 0,","i32 0"]),
-    StoFPCode = ?LIN(["store","i32(i32,i32)*",FunctionName ++ "," ,"i32(i32,i32)**",FunctionPointer]),
+    #typeCl{name=ClosureTypeName} = ClType,
+    ClosureType = decode_type(ClType),
 
-    BindPointer = compil_table:newTemp(),
-    GetBPCode = ?LIN([BindPointer,"=","getelementptr",ClojureStructType,StructPointer++",","i32 0,","i32 2"]),
-    StoBPCode = ?LIN(["store","i32","%"++CaptureName ++ ",","i32*",BindPointer]),
+    FunTypeStr = decode_type(FunType),
 
-    {StructPointer, lists:reverse([AllocCode, GetFPCode, StoFPCode, GetBPCode, StoBPCode])};
+    emit_closure_struct(ClType),
+
+    AllocCode = ?LIN([StructPointer,"=","alloca","%" ++ ClosureTypeName]),
+    GetFPCode = ?LIN([FunctionPointer,"=","getelementptr",ClosureType,StructPointer++ ",","i32 0,","i32 0"]),
+    StoFPCode = ?LIN(["store",FunTypeStr, FunctionName ++ "," ,FunTypeStr ++ "*",FunctionPointer]),
+
+    CaptureCode = lists:concat(lists:map(
+        fun
+            ({ #name{name=CaptureName, type=CaptureType }, Num}) ->
+                TypeStr = decode_type(CaptureType),
+                BindPointer = compil_table:newTemp(),
+                NumStr = integer_to_list(Num),
+                GetBPCode = ?LIN([BindPointer,"=","getelementptr",ClosureType,StructPointer++",","i32 0,","i32",NumStr]),
+                StoBPCode = ?LIN(["store",TypeStr,[$\%|CaptureName] ++ ",", TypeStr ++ "*",BindPointer]),
+                [GetBPCode, StoBPCode]
+        end,
+        lists:zip(Captures,lists:seq(1, length(Captures))))),
+
+    {StructPointer, lists:reverse([AllocCode, GetFPCode, StoFPCode] ++ CaptureCode)};
 
 
 
@@ -465,6 +490,11 @@ codegen(#literal{type=int, value=Val}) ->
     MyVar = integer_to_list(Val),
     {MyVar, ?NOCODE}.
 
+
+emit_closure_struct(#typeCl{ name=ClosureTypeName, lambda=TypeFun, captures=CaptureTypes }) ->
+    ArgTypesString = string:join(lists:map(fun decode_type/1,CaptureTypes),", "),
+    FunString = decode_type(TypeFun),
+    compil_emitter:function(?LIN(["%" ++ ClosureTypeName,"=","type","{",FunString ++ ",", ArgTypesString,"}"])).
 
 maingen(Exprs) ->
     Final = lists:last(Exprs),
@@ -491,6 +521,6 @@ decode('-') -> "sub".
 
 % Types
 decode_type(#typeFun{return=Return,arguments=Args}) ->
-    decode_type(Return) ++ "(" ++ string:join(lists:map(fun decode_type/1, Args)," ,") ++ ")*";
-decode_type(#typeCl{ }) -> "%closure*";
+    decode_type(Return) ++ "(" ++ string:join(lists:map(fun decode_type/1, Args),", ") ++ ")*";
+decode_type(#typeCl{ name=Name}) -> "%" ++ Name ++ "*";
 decode_type(int) -> "i32".
