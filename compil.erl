@@ -13,10 +13,7 @@
 % * list implementation
 % * quote
 % * closure
-%   * remove hacks ( make size adjustable)
-%   * rework code
 %   * ( rather store on head, than in stackframe)
-% * generalize everything prim op handling
 
 %% Problems:
 % * when shall i free the allocated storage for closures
@@ -118,8 +115,13 @@ addGlobalEnv() ->
 %                                     end
 %                end,"", PreCode)).
 
--define(PRIMOPS,['+','-','*','/']).
--define(BUILDIN,?PRIMOPS ++ ['cond']).
+
+-define(BOOL_OPS,['and','or']).
+-define(CMP_OPS,['=','<','>']).
+-define(NUM_OPS,['+','-','*','/']).
+
+-define(PRIMOPS,?BOOL_OPS ++ ?CMP_OPS ++ ?NUM_OPS).
+-define(BUILDINS,?PRIMOPS ++ ['cond']).
 
 -record(literal,{
           type :: systemType(),
@@ -132,7 +134,8 @@ addGlobalEnv() ->
 	  name :: string(),
 	  env :: reference(),
       type,
-      buildin :: boolean()
+      buildin :: boolean(),
+      primitiv :: boolean()
 	 }).
 
 -record(nameDef, {
@@ -203,12 +206,12 @@ split_env(BoolLit, _Env) when is_boolean(BoolLit) ->
     #literal{ type=bool, value=BoolLit};
 
 split_env(Atom, Env) when is_atom(Atom) ->
-    case lists:member(Atom,?BUILDIN) of
-        true ->
-            #name{name=Atom, buildin=true};
-        _   ->
+    case {lists:member(Atom,?BUILDINS),lists:member(Atom,?PRIMOPS)} of
+        {false, false}  ->
             {NameEnv, NewName} = lookup_name(Env, Atom),
-            #name{name = NewName, env = NameEnv, buildin=false }
+            #name{name = NewName, env = NameEnv, buildin=false };
+        {IsBuildin, IsPrimitiv} ->
+            #name{name=Atom, buildin=IsBuildin, primitiv=IsPrimitiv}
     end.
 
 %split_env(StringLit) when is_string(StringLit) ->
@@ -385,8 +388,18 @@ extract_type(#closure{ type= Type}) -> Type.
 %conversions(int,float) ->
 %    float.
 
-buildin_type('+') ->
-    #typeFun{arguments=[int, int], return=int}.
+buildin_type(OP) ->
+    case
+        {   lists:member(OP,?BOOL_OPS),
+            lists:member(OP,?CMP_OPS),
+            lists:member(OP,?NUM_OPS)} of
+        { true, _, _ } ->
+            #typeFun{arguments=[bool, bool], return=bool};
+        { _, true, _ } ->
+            #typeFun{arguments=[int, int], return=bool};
+        { _, _, true} ->
+            #typeFun{arguments=[int, int], return=int}
+    end.
 
 
 -define(NOCODE,[]).
@@ -442,10 +455,10 @@ codegen(#call{ type=RetType, target = Target,  arguments = Args }) ->
     {Vars, ArgCodes}  = lists:unzip(CodeArgs),
     ArgCodeLines =  lists:concat(ArgCodes),
     case Target of
-        #name{ name='+' } ->
+        #name{ name=Primitiv, primitiv=true } ->
             MyVar = compil_table:newTemp(),
             [VarA, VarB] = Vars,
-            MyOp = ?LIN([MyVar,"=", decode('+'), decode_type(RetType), VarA,",",VarB]),
+            MyOp = ?LIN([MyVar,"=", decode(Primitiv), decode_type(RetType), VarA,",",VarB]),
             {MyVar, [ MyOp | ArgCodeLines ]};
         #lambda{ type=#typeFun {arguments=ArgTypes} } = Lambda ->
             {LambdaVar, _ } = codegen(Lambda),
@@ -564,8 +577,12 @@ edt(Expr) -> decode_type(extract_type(Expr)).
 decode('+') -> "add";
 decode('/') -> "div";
 decode('*') -> "mul";
-decode('-') -> "sub".
-
+decode('-') -> "sub";
+decode('or') -> "or";
+decode('and') -> "and";
+decode('=') -> "icmp eq";
+decode('<') -> "icmp sgt";
+decode('=') -> "icmp slt".
 
 % Types
 decode_type(#typeFun{return=Return,arguments=Args}) ->
