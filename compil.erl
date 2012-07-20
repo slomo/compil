@@ -121,7 +121,7 @@ addGlobalEnv() ->
 -define(NUM_OPS,['+','-','*','/']).
 
 -define(PRIMOPS,?BOOL_OPS ++ ?CMP_OPS ++ ?NUM_OPS).
--define(BUILDINS,?PRIMOPS ++ ['cond']).
+-define(BUILDINS,?PRIMOPS ++ ['cond', fix]).
 
 -record(literal,{
           type :: systemType(),
@@ -291,9 +291,9 @@ close_var(Other) ->
     Other.
 
 
+-record(fix,{closure,type}).
 
 % types
-
 -record(typeFun,{arguments=[],return}).
 
 % This record represents a clsoure type. The name fild, is the type name
@@ -324,6 +324,23 @@ type(#lambda{definitions = Definitions, child = Child} = Lambda) ->
         end, Definitions)),
     MyType = #typeFun{return=extract_type(TypedChild), arguments=ArgTypes},
     Lambda#lambda{definitions=TypedDefinitions, child=TypedChild, type=MyType};
+
+% Test: typing of the fix point
+type(#call{ target=Target=#name{name=fix }, arguments=[Closure]} = Expr) ->
+
+    #closure{ lambda=Lambda }  = Closure,
+    #lambda{ definitions= [ NameDef = #nameDef{ name=SelfReference } | _Other ] } = Lambda,
+    Type = #typeCl{
+           lambda = #typeFun{ return=int, arguments=[int]},
+            name   = "clojure_fix",
+            captures=[] %#typeFun{ return=int, arguments=[int]}
+        },
+    %Type = #typeFun{return=int, arguments=[int]},
+    emit_closure_struct(Type),
+    compil_table:setType(SelfReference, Type),
+    TypedClosure = type(Closure),
+    #fix{ closure=TypedClosure, type=#typeFun{return=int, arguments=[int]}};
+
 
 type(#call{ target=Target=#name{name='cond' }, arguments=[Cond, Left, Right]} = Expr) ->
     TypedCond = ensure_type(Cond,bool),
@@ -380,8 +397,8 @@ extract_type(#call{ type = Type}) -> Type;
 extract_type(#name{type = Type}) -> Type;
 extract_type(#literal{type = Type}) -> Type;
 extract_type(#lambda{type = Type}) -> Type;
-extract_type(#closure{ type= Type}) -> Type.
-
+extract_type(#closure{ type= Type}) -> Type;
+extract_type(#fix{ type= Type}) -> Type.
 
 
 % @doc: show which type may be mapped to int
@@ -420,6 +437,8 @@ codegen(#lambda{label = Label, definitions=Defs, child = Child}) ->
     compil_emitter:function(Code),
     {"@" ++ Label,""};
 
+
+
 codegen(#call{ target=Target=#name{name='cond' }, arguments=[Cond, Left, Right]}) ->
     {CondVar, CondCodes } = codegen(Cond),
     {TrueVar, TrueCodes } = codegen(Left),
@@ -432,6 +451,7 @@ codegen(#call{ target=Target=#name{name='cond' }, arguments=[Cond, Left, Right]}
     Pointer = compil_table:newTemp(),
     MyVar = compil_table:newTemp(),
 
+    % TODO: typing
     AllocCode = ?LIN([Pointer,"=","alloca","i32"]),
     BranchCode = ?LIN(["br i1",CondVar++",","label",LabelTrue ++ ",","label",LabelFalse  ] ),
     LabelTrueCode = ?LABEL(LabelTrue),
@@ -443,9 +463,9 @@ codegen(#call{ target=Target=#name{name='cond' }, arguments=[Cond, Left, Right]}
 
     LoadCode = ?LIN([MyVar,"=","load","i32*",Pointer]),
 
-    {MyVar, lists:reverse(CondCodes ++ [AllocCode, BranchCode] ++
-            [LabelTrueCode | TrueCodes] ++
-            [ StoreTrueCode | [ContinueCode | [LabelFalseCode | FalseCodes]]] ++
+    {MyVar, lists:reverse(lists:reverse(CondCodes) ++ [AllocCode, BranchCode] ++
+            [LabelTrueCode | lists:reverse(TrueCodes)] ++
+            [ StoreTrueCode | [ContinueCode | [LabelFalseCode | lists:reverse(FalseCodes)]]] ++
             [StoreFalseCode, ContinueCode,  LabelContinueCode, LoadCode ])};
 
 
@@ -458,7 +478,7 @@ codegen(#call{ type=RetType, target = Target,  arguments = Args }) ->
         #name{ name=Primitiv, primitiv=true } ->
             MyVar = compil_table:newTemp(),
             [VarA, VarB] = Vars,
-            MyOp = ?LIN([MyVar,"=", decode(Primitiv), decode_type(RetType), VarA,",",VarB]),
+            MyOp = ?LIN([MyVar,"=", decode(Primitiv), edt(hd(Args)), VarA,",",VarB]),
             {MyVar, [ MyOp | ArgCodeLines ]};
         #lambda{ type=#typeFun {arguments=ArgTypes} } = Lambda ->
             {LambdaVar, _ } = codegen(Lambda),
@@ -467,6 +487,41 @@ codegen(#call{ type=RetType, target = Target,  arguments = Args }) ->
             VarString = string:join(ArgsStr,", "),
             MyCall = ?LIN([MyVar,"=","call",decode_type(RetType), LambdaVar, "(", VarString ,")"]),
             {MyVar, [ MyCall | ArgCodeLines ]};
+
+    #fix{ closure=Closure } ->
+        #closure{ lambda = Lambda =  #lambda{ type=Type}} = Closure,
+        {FunctionName,_} = codegen(Lambda),
+        StructPointer = compil_table:newTemp(),
+        ClosureTypeName = "clojure_fix",
+        ClosureType = "%" ++ ClosureTypeName ++"*",
+
+        FixName =  "@fix",
+        ValueName = "%fix_value",
+        RetValueName = "%fix_ret",
+        FixHeader = ?LIN(["define","i32",FixName,"(i32",ValueName,")"]),
+        FixCall =  ?LIN([RetValueName,"=","call","i32",FunctionName,"(", ClosureType ,StructPointer,
+                ",","i32",ValueName,")"]),
+        FixReturn = ?LIN(["ret","i32",RetValueName]),
+
+        ArgTypes = [int],
+        ArgsStr = lists:map( fun({Var, Type}) -> decode_type(Type) ++ " " ++  Var end,
+            lists:zip(Vars, ArgTypes)),
+        VarString = string:join(ArgsStr,", "),
+
+
+        FunctionPointer = compil_table:newTemp(),
+        AllocCode = ?LIN([StructPointer,"=","alloca","%" ++ ClosureTypeName]),
+        GetFPCode = ?LIN([FunctionPointer,"=","getelementptr",ClosureType,StructPointer++ ",","i32 0,","i32 0"]),
+        StoFPCode = ?LIN(["store","i32(i32)*", FixName ++ "," ,"i32(i32)*" ++ "*",FunctionPointer]),
+
+        Code = ?FUNCTION([ FixHeader, AllocCode, GetFPCode, StoFPCode, FixCall, FixReturn]),
+        compil_emitter:function(Code),
+
+        MyVar = compil_table:newTemp(),
+        MyCall = ?LIN([MyVar,"=","call",decode_type(RetType), FixName, "(", VarString ,")"]),
+        {MyVar, [ MyCall | ArgCodeLines ]};
+
+
         Other -> % callee must be a closure
             ClType = #typeCl{ lambda=FunType = #typeFun{ arguments=ArgTypes }, captures=CaptureTypes } = extract_type(Other),
             { StructPointer, PrevCodes} = codegen(Other),
@@ -498,7 +553,8 @@ codegen(#call{ type=RetType, target = Target,  arguments = Args }) ->
             MyVar = compil_table:newTemp(),
             CallCode = ?LIN([MyVar,"=","call",decode_type(RetType),FunctionPointer,"(",VarString,")"]),
 
-            { MyVar, lists:reverse(BindCodes ++ [ComputeFPPCode,LoadFPCode,CallCode]) ++ PrevCodes }
+            { MyVar, lists:reverse(BindCodes ++ [ComputeFPPCode,LoadFPCode,CallCode]) ++ PrevCodes ++
+            ArgCodeLines }
 
     end;
 
@@ -553,9 +609,9 @@ codegen(#literal{type=bool, value=Val}) ->
     {MyVar, ?NOCODE}.
 
 emit_closure_struct(#typeCl{ name=ClosureTypeName, lambda=TypeFun, captures=CaptureTypes }) ->
-    ArgTypesString = string:join(lists:map(fun decode_type/1,CaptureTypes),", "),
-    FunString = decode_type(TypeFun),
-    compil_emitter:function(?LIN(["%" ++ ClosureTypeName,"=","type","{",FunString ++ ",", ArgTypesString,"}"])).
+    ArgTypes = lists:map(fun decode_type/1,CaptureTypes),
+    FunString = string:join([decode_type(TypeFun) | ArgTypes],", "),
+    compil_emitter:function(?LIN(["%" ++ ClosureTypeName,"=","type","{",FunString,"}"])).
 
 maingen(Exprs) ->
     Final = lists:last(Exprs),
@@ -581,8 +637,8 @@ decode('-') -> "sub";
 decode('or') -> "or";
 decode('and') -> "and";
 decode('=') -> "icmp eq";
-decode('<') -> "icmp sgt";
-decode('=') -> "icmp slt".
+decode('<') -> "icmp slt";
+decode('>') -> "icmp sgt".
 
 % Types
 decode_type(#typeFun{return=Return,arguments=Args}) ->
