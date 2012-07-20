@@ -7,7 +7,7 @@
 %% -----------------------------------------------------------------------------
 
 -module(compil).
--export([do/1, do/2, fromFileToFile/2]).
+-export([do/1, lli/1, do/2, fromFileToFile/2]).
 
 %% TODO:
 % * list implementation
@@ -39,6 +39,15 @@ do(String) ->
     compil_emitter:to_stdout(),
     compil_table:stop(),
     compil_emitter:stop().
+
+lli(String) ->
+    {ok, _} = compil_table:start_link(),
+    {ok, _} = compil_emitter:start_link(),
+    runAsProcess(String),
+    Ret = compil_emitter:to_lli(),
+    compil_table:stop(),
+    compil_emitter:stop(),
+    Ret.
 
 
 fromFileToFile(SourceFileName, TargetFileName) ->

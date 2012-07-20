@@ -30,10 +30,12 @@ to_stdout() ->
 
 to_lli() ->
     Content = gen_server:call(?MODULE, return_all),
-    io:fwrite("\n------- Begin code -------\n"),
+    io:fwrite("---- llvm code for debugging ----\n"),
     io:fwrite(Content),
-    io:fwrite("\n------- End code -------\n").
-
+    io:fwrite("---- programm output ------------\n"),
+    {Ret, _ } = string:to_integer(os:cmd("echo '" ++ Content ++ "' | lli ; echo $?")),
+    io:fwrite("---- return val: ~3p ------------\n",[Ret]),
+    Ret.
 
 % internal
 
