@@ -620,17 +620,20 @@ codegen(#call{ target=Target=#name{name='cond' }, arguments=[Cond, Left, Right]}
     Pointer = compil_table:newTemp(),
     MyVar = compil_table:newTemp(),
 
+    TypeStr = edt(Left), % = edt(Right) since typcheked
+
+
     % TODO: typing
-    AllocCode = ?LIN([Pointer,"=","alloca","i32"]),
+    AllocCode = ?LIN([Pointer,"=","alloca",TypeStr]),
     BranchCode = ?LIN(["br i1",CondVar++",","label",LabelTrue ++ ",","label",LabelFalse  ] ),
     LabelTrueCode = ?LABEL(LabelTrue),
-    StoreTrueCode = ?LIN(["store","i32",TrueVar++",","i32*",Pointer]),
+    StoreTrueCode = ?LIN(["store",TypeStr,TrueVar++",",TypeStr++"*",Pointer]),
     ContinueCode  = ?LIN(["br","label",LabelContinue]),
     LabelContinueCode = ?LABEL(LabelContinue),
     LabelFalseCode = ?LABEL(LabelFalse),
-    StoreFalseCode = ?LIN(["store","i32",FalseVar++",","i32*",Pointer]),
+    StoreFalseCode = ?LIN(["store",TypeStr,FalseVar++",",TypeStr++"*",Pointer]),
 
-    LoadCode = ?LIN([MyVar,"=","load","i32*",Pointer]),
+    LoadCode = ?LIN([MyVar,"=","load",TypeStr++"*",Pointer]),
 
     {MyVar, lists:reverse(lists:reverse(CondCodes) ++ [AllocCode, BranchCode] ++
             [LabelTrueCode | lists:reverse(TrueCodes)] ++
