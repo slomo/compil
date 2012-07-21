@@ -8,19 +8,11 @@
 
 -module(compil).
 
--export([do/1, lli/1, do/2, fromFileToFile/2]).
-
-%% TODO:
-% * list implementation
-% * quote
-% * closure
-%   * ( rather store on head, than in stackframe)
-
-%% Problems:
-% * when shall i free the allocated storage for closures
-
+-export([do/1, lli/1, fromFileToFile/2]).
 
 -export([main/1]).
+
+%% doc: this should be called as init, if running with no shell
 
 main([]) ->
     io:fwrite("Need input file");
@@ -31,82 +23,74 @@ main([FromFile,ToFile]) ->
 main(Other)->
     io:write(Other).
 
-runAsProcess(String) ->
+%% == public  API =============================================================
+
+%% doc: compile and print it
+do(String) ->
+    runAsProcess(String, fun compil_emitter:to_stdout/0 ).
+
+%% doc: compile and try to run in lli
+lli(String) ->
+    runAsProcess(String, fun compil_emitter:to_lli/0).
+
+%% doc: read from file compile and write to file
+fromFileToFile(SourceFileName, TargetFileName) ->
+    {ok, String} = file:read_file(SourceFileName),
+    runAsProcess(binary_to_list(String),fun
+        (_) -> compil_emitter:to_file(TargetFileName) end).
+
+%% doc: wrapper to run compile in other process, in case it crashes. The wrapper
+%%      starts and stops also needed services
+runAsProcess(String, ResultHandler) ->
+    {ok, _} = compil_table:start_link(),
+    {ok, _} = compil_emitter:start_link(),
     Pid = self(),
-    spawn(fun () ->  ?MODULE:do(String, Pid) end),
+    spawn(fun () ->  do(String, Pid) end),
     receive
         done ->
-            ok;
+            Ret = ResultHandler();
         Value ->
-            io:format("Got value ~p",Value)
+            io:format("compiler returned: ~p",[Value]),
+            Ret = Value
     after 2000 ->
-            io:format("timeout"),
-            timeout
-    end.
-
-%% @doc entrypoint for compilation
-do(String) ->
-    {ok, _} = compil_table:start_link(),
-    {ok, _} = compil_emitter:start_link(),
-    runAsProcess(String),
-    compil_emitter:to_stdout(),
-    compil_table:stop(),
-    compil_emitter:stop().
-
-lli(String) ->
-    {ok, _} = compil_table:start_link(),
-    {ok, _} = compil_emitter:start_link(),
-    runAsProcess(String),
-    Ret = compil_emitter:to_lli(),
+            io:format("compiler crashed"),
+            Ret = timeout
+    end,
     compil_table:stop(),
     compil_emitter:stop(),
     Ret.
 
-
-fromFileToFile(SourceFileName, TargetFileName) ->
-    {ok, String} = file:read_file(SourceFileName),
-    {ok, _} = compil_table:start_link(),
-    {ok, _} = compil_emitter:start_link(),
-    case runAsProcess(binary_to_list(String)) of
-        ok ->
-            compil_emitter:to_file(TargetFileName),
-            compil_table:stop(),
-            compil_emitter:stop();
-        timeout ->
-            compil_table:stop(),
-            compil_emitter:stop(),
-            throw(compil_error)
-    end.
-
-
-
+%% doc: compilation function, chains all steps together and notifies sender
 do(String, Pid) ->
+    % read all s-expr
     Trees = lexAndParse(String),
 
+    % precompile them
     PrecompiledTrees = lists:map(fun precompile/1, Trees),
 
-    addGlobalEnv(),
-
+    % add global env (parent of uppermost symbols)
+    compil_table:newEnv(global, undefined),
     EnvCodes = lists:map(fun(Tree) ->
                 split_env(Tree, global) end, PrecompiledTrees),
 
 
+    % scan for free vars
     lists:map(fun (Code) -> scan_free(Code, global) end, EnvCodes),
 
+    % introduce clsoures
     ClosedCodes = lists:map(fun close_var/1, EnvCodes),
 
+    % type it
     TypedCodes = lists:map(fun type/1, ClosedCodes),
 
+    % generate llvm
     LLVM = lists:map(fun codegen/1, TypedCodes),
 
+    % generate llvm for main and emit
     compil_emitter:function(maingen(LLVM) ++ "\n"),
+
+    % signal caller
     Pid ! done.
-
-
-
-
-addGlobalEnv() ->
-    compil_table:newEnv(global, undefined).
 
 
 %% == internal implementation =================================================
