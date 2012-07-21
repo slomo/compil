@@ -7,6 +7,7 @@
 %% -----------------------------------------------------------------------------
 
 -module(compil).
+
 -export([do/1, lli/1, do/2, fromFileToFile/2]).
 
 %% TODO:
@@ -17,6 +18,18 @@
 
 %% Problems:
 % * when shall i free the allocated storage for closures
+
+
+-export([main/1]).
+
+main([]) ->
+    io:fwrite("Need input file");
+main([FromFile]) ->
+    main([FromFile, 'out.ll']);
+main([FromFile,ToFile]) ->
+    ?MODULE:fromFileToFile(atom_to_list(FromFile),atom_to_list(ToFile));
+main(Other)->
+    io:write(Other).
 
 runAsProcess(String) ->
     Pid = self(),
