@@ -37,7 +37,7 @@ lli(String) ->
 fromFileToFile(SourceFileName, TargetFileName) ->
     {ok, String} = file:read_file(SourceFileName),
     runAsProcess(binary_to_list(String),fun
-        (_) -> compil_emitter:to_file(TargetFileName) end).
+        () -> compil_emitter:to_file(TargetFileName) end).
 
 %% doc: read from file compile and put to stdout
 doFile(SourceFileName) ->
@@ -447,12 +447,12 @@ type(#lambda{definitions = Definitions, child = Child} = Lambda) ->
 %%  * guess return type of recursiv function
 %%  * help the type inference for the function
 %%  * name fix it self callable, with type of the function
-type(#call{ target=Target=#name{name=fix }, arguments=[Closure]} = Expr) ->
+type(#call{ target=#name{name=fix }, arguments=[Closure]}) ->
 
     % FIXME: i am evil fixed typed code
     #closure{ lambda=Lambda }  = Closure,
     #lambda{ label = Label,
-        definitions= [ NameDef = #nameDef{ name=SelfReference } | _Other ] } = Lambda,
+        definitions= [ #nameDef{ name=SelfReference } | _Other ] } = Lambda,
     Type = #typeCl{
            lambda = #typeFun{ return=int, arguments=[int]},
             name   = "clojure_fix_"++Label,
@@ -608,7 +608,7 @@ codegen(#lambda{label = Label, definitions=Defs, child = Child}) ->
     {"@" ++ Label,?NOCODE};
 
 %% standard if-then-else style code
-codegen(#call{ target=Target=#name{name='cond' }, arguments=[Cond, Left, Right]}) ->
+codegen(#call{ target=#name{name='cond' }, arguments=[Cond, Left, Right]}) ->
     {CondVar, CondCodes } = codegen(Cond),
     {TrueVar, TrueCodes } = codegen(Left),
     {FalseVar, FalseCodes } = codegen(Right),
@@ -666,7 +666,7 @@ codegen(#call{ type=RetType, target = Target,  arguments = Args }) ->
 
         %% call to fix point operators (complex stuff ;)
         #fix{ closure=Closure, cltype = ClType = #typeCl{ name=ClosureTypeName}, type=FixType} ->
-            #closure{ lambda = Lambda =  #lambda{ type=Type, label=Label}} = Closure,
+            #closure{ lambda = Lambda =  #lambda{ label=Label}} = Closure,
             #typeFun{ return = ReturnType0, arguments=[ArgType0] } = FixType,
             ReturnType = decode_type(ReturnType0),
             ArgType = decode_type(ArgType0),
@@ -727,7 +727,6 @@ codegen(#call{ type=RetType, target = Target,  arguments = Args }) ->
 
                 end,
                 lists:zip(CaptureTypes,lists:seq(1, length(CaptureTypes))))),
-            BindCode = lists:concat(BindCodes),
 
             ArgsStr = lists:map( fun({Var, Type}) -> decode_type(Type) ++ " " ++  Var end, lists:zip(Vars ++ BindVars, ArgTypes)),
             VarString = string:join(ArgsStr,", "),
@@ -812,7 +811,7 @@ maingen(Exprs) ->
     % sense is questionabel
     {_, Code} = lists:unzip(Exprs),
     Lines = lists:concat(lists:map(fun lists:reverse/1, Code)),
-    {FinalVar, FinalCode} = Final,
+    {FinalVar, _ } = Final,
 
     % other return types than int make no sense
     RetType = decode_type(int),
