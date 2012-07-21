@@ -8,7 +8,7 @@
 
 -module(compil).
 
--export([do/1, lli/1, fromFileToFile/2]).
+-export([do/1, lli/1, doFile/1, fromFileToFile/2]).
 
 -export([main/1]).
 
@@ -17,7 +17,7 @@
 main([]) ->
     io:fwrite("Need input file");
 main([FromFile]) ->
-    main([FromFile, 'out.ll']);
+    ?MODULE:doFile(atom_to_list(FromFile));
 main([FromFile,ToFile]) ->
     ?MODULE:fromFileToFile(atom_to_list(FromFile),atom_to_list(ToFile));
 main(Other)->
@@ -38,6 +38,11 @@ fromFileToFile(SourceFileName, TargetFileName) ->
     {ok, String} = file:read_file(SourceFileName),
     runAsProcess(binary_to_list(String),fun
         (_) -> compil_emitter:to_file(TargetFileName) end).
+
+%% doc: read from file compile and put to stdout
+doFile(SourceFileName) ->
+    {ok, String} = file:read_file(SourceFileName),
+    runAsProcess(binary_to_list(String),fun compil_emitter:to_stdout/0).
 
 %% doc: wrapper to run compile in other process, in case it crashes. The wrapper
 %%      starts and stops also needed services
