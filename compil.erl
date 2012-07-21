@@ -107,75 +107,116 @@ addGlobalEnv() ->
     compil_table:newEnv(global, undefined).
 
 
-%    Phase2 = entryPoint(phase2(Tree)),
-%    io:write(Phase2),
-%    io:fwrite("~n---------~n"),
-%    {_type,Typed} = type(Phase2),
-%    io:write(Typed),
-%    io:fwrite("~n---------~n"),
-%    {_var,PreCode} = codegen(Typed),
-%    io:write(PreCode),
-%    io:fwrite("~n---------~n"),
-%    io:fwrite(lists:foldr(
-%                fun(A,B) ->
-%                        case A of
-%                            "" -> B;
-%                            A -> A ++ " \n" ++ B
-%                                     end
-%                end,"", PreCode)).
+%% -- internal implementation -------------------------------------------------
 
+%% In the part of the module all basic steps of the compilation process are
+%% implemented in the following code. The modul it self is stateless, but side
+%% effects accour on the symbol table defined in compil_table.
 
+%% Following are most of the record and type definitions used in this project.
+
+%% These definitions conclude all primitive operators. A primary operator is a of
+%% the source language, that has a direct representation in llvm.
+-type primitive_operator() :: 'and' | 'or' | '=' | '<' | '>' |
+                             '+' | '-' | '*' | '/'.
 -define(BOOL_OPS,['and','or']).
 -define(CMP_OPS,['=','<','>']).
 -define(NUM_OPS,['+','-','*','/']).
 
 -define(PRIMOPS,?BOOL_OPS ++ ?CMP_OPS ++ ?NUM_OPS).
+
+
+%% Buildins are all primary operators, as well as all special keywords of the
+%% target language.
 -define(BUILDINS,?PRIMOPS ++ ['cond', fix]).
 
--record(literal,{
-          type :: systemType(),
-          value :: any()
-         }).
 
--type systemType() :: int | float | bool.
+%% These records and types are used to express types in the compilation process
+%% later on. They are defined here so that all definitions are in one place.
+
+%% This is a function type, in llvm represented by the function pointer:
+%% return(arg1,arg2 .. argn)*
+-record(typeFun,{
+        arguments = []      :: [ type_def() ],
+        return              :: type_def()
+    }).
+
+%% This represents the type of a closure (passable function). In llvm it is
+%% maped to a record, with the namen given in this type. This records has as
+%% first element a pointer of type lambda, and then the captures following.
+-record(typeCl,{
+        lambda              :: #typeFun{},
+        name                :: string(),
+        captures =[]        :: [ type_def() ]
+    }).
+
+-type basic_type_def() :: int | bool.
+-type type_def() :: basic_type_def() | #typeFun{} | #typeCl{}.
+
+
+%% The following definitons compose the ast, which all compile functions work
+%% on. As mentioned additional data might be stored in the symbol table, but
+%% most is stored here.
+
+-record(literal, {
+        type                :: type_def(),
+        value               :: boolean() | integer()
+    }).
 
 -record(name,{
-	  name :: string(),
-	  env :: reference(),
-      type,
-      buildin :: boolean(),
-      primitiv :: boolean()
-	 }).
+	    name                :: string(),
+	    env                 :: reference(), % env which defines that name
+        type                :: type_def(),
+        buildin             :: boolean(),
+        primitiv            :: boolean()
+    }).
 
+%% This record is used, where new names are defined, i would not use it again,
+%% becaus all data can be keept in a #name{} record, an wether it is a
+%% definiton or not is clear from the context
 -record(nameDef, {
-        oldName, name, type }).
+        oldName             :: atom(),      % name from source code
+        name                :: string(),    % unique name in programm
+        type                :: type_def()
+    }).
 
 -record(lambda, {
-	  ref  :: reference(),
-      label :: string(),
-      type,
-	  definitions,
-      free_vars, % { var name, new boundname }
-	  child
-	 }).
-
--record(call,{
-	  target,
-	  arguments,
-      kind,
-      type
+	  ref                   :: reference(), % unique reference for symbol table
+      label                 :: string(),    % name in llvm code
+      type                  :: #typeFun{},
+      definitions           :: #nameDef{},  % names introduced by this functions
+      free_vars,                            % { var name, new boundname }
+      child                 :: ast()
 	 }).
 
 -record(closure,{
-    lambda,
-    type,
-    captures = []
-}).
+        lambda              :: #lambda{},  % anonymous function
+        type                :: #typeCl{},
+        captures = []       :: [ #name{} ] % names captured from outer env
+    }).
 
-%% precompiler
+-record(fix,{
+        closure             :: #closure{}, % recursiv function
+        type                :: #typeFun{}
+    }).
+
+-record(call,{
+        target              :: #name{} | #typeFun{} | #closure{} | #fix{},
+	    arguments           :: [ ast() ],
+        type                :: type_def()
+	 }).
+
+%% ast can be defined without #nameDef{} => #nameDef useless
+-type ast() :: #lambda{} | #closure{} | #call{} | #fix{} | #name{} | #literal{}.
+
+
+%% -- the precompiler ---------------------------------------------------------
 
 precompile([ '+' | [ Arg1 | Args ]]) ->
-    lists:foldl(fun(X,Y) ->  [ '+' , Y , precompile(X)] end, precompile(Arg1), Args);
+    lists:foldl(
+        fun(X,Y) ->  [ '+' , Y , precompile(X)] end,
+        precompile(Arg1),
+        Args);
 precompile([ 'let' , Definitions, Child]) ->
     { FormalArguments, Parameters } = lists:unzip(lists:map( fun erlang:list_to_tuple/1, Definitions)),
     [
@@ -300,14 +341,7 @@ close_var(Other) ->
     Other.
 
 
--record(fix,{closure,type}).
-
-% types
--record(typeFun,{arguments=[],return}).
-
-% This record represents a clsoure type. The name fild, is the type name
-% later on choosen for the struct, representing this closure
--record(typeCl,{lambda,name,captures=[]}).
+%typing
 
 type(#closure{lambda=Lambda, captures=Captures} = Closure) ->
     TypedLambda = type(Lambda),
@@ -638,7 +672,7 @@ maingen(Exprs) ->
 edt(Expr) -> decode_type(extract_type(Expr)).
 
 
-% Operators
+
 decode('+') -> "add";
 decode('/') -> "div";
 decode('*') -> "mul";
