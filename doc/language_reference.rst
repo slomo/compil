@@ -85,7 +85,7 @@ value of the last expression is returned as return value. Given you have the
 program in the file prog.lisp and installed lli (llvm interpreter), just run:
 
 ::
-    {{bash}}
+
     lli prog.lisp && echo $?
 
 Conditional Execution
