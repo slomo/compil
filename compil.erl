@@ -179,7 +179,7 @@ do(String, Pid) ->
 
 -type env_ref() :: reference() | global.
 -record(lambda, {
-	  ref                   :: env_ref(), % unique reference for symbol table
+	  ref                   :: env_ref(),   % unique reference for symbol table
       label                 :: string(),    % name in llvm code
       type                  :: #typeFun{},
       definitions           :: #nameDef{},  % names introduced by this functions
@@ -189,13 +189,14 @@ do(String, Pid) ->
 
 
 -record(closure,{
-        lambda              :: #lambda{},  % anonymous function
+        lambda              :: #lambda{},   % anonymous function
         type                :: #typeCl{},
-        captures = []       :: [ #name{} ] % names captured from outer env
+        captures = []       :: [ #name{} ]  % names captured from outer env
     }).
 
 -record(fix,{
-        closure             :: #closure{}, % recursiv function
+        closure             :: #closure{},  % recursiv function
+        cltype              :: #typeCl{},   % type of compiled fixpoint
         type                :: #typeFun{}
     }).
 
@@ -450,17 +451,16 @@ type(#call{ target=Target=#name{name=fix }, arguments=[Closure]} = Expr) ->
 
     % FIXME: i am evil fixed typed code
     #closure{ lambda=Lambda }  = Closure,
-    #lambda{ definitions= [ NameDef = #nameDef{ name=SelfReference } | _Other ] } = Lambda,
+    #lambda{ label = Label,
+        definitions= [ NameDef = #nameDef{ name=SelfReference } | _Other ] } = Lambda,
     Type = #typeCl{
            lambda = #typeFun{ return=int, arguments=[int]},
-            name   = "clojure_fix",
+            name   = "clojure_fix_"++Label,
             captures=[] %#typeFun{ return=int, arguments=[int]}
         },
-    %Type = #typeFun{return=int, arguments=[int]},
-    emit_closure_struct(Type),
     compil_table:setType(SelfReference, Type),
     TypedClosure = type(Closure),
-    #fix{ closure=TypedClosure, type=#typeFun{return=int, arguments=[int]}};
+    #fix{ closure=TypedClosure, cltype=Type, type=#typeFun{return=int, arguments=[int]}};
 
 %% typing for cond:
 %%  * ensure that cond is boolean
@@ -518,6 +518,7 @@ type_check_args(Got, Expected) ->
 %%      and throws an exception if types do not match. It is the core of type
 %%      inference.
 
+
 -spec ensure_type(ast(),type_def()) -> ast().
 
 ensure_type(Expr = #name{ name=Name },Type) ->
@@ -530,6 +531,7 @@ ensure_type(Expr = #name{ name=Name },Type) ->
     type(Expr);
 ensure_type(Expr, Type) ->
     TypedExpr = type(Expr),
+    
     Type = extract_type(TypedExpr),
     TypedExpr.
 
@@ -660,31 +662,34 @@ codegen(#call{ type=RetType, target = Target,  arguments = Args }) ->
             {MyVar, [ MyCall | ArgCodeLines ]};
 
         %% call to fix point operators (complex stuff ;)
-        #fix{ closure=Closure } ->
-            #closure{ lambda = Lambda =  #lambda{ type=Type}} = Closure,
+        #fix{ closure=Closure, cltype = ClType = #typeCl{ name=ClosureTypeName}, type=FixType} ->
+            #closure{ lambda = Lambda =  #lambda{ type=Type, label=Label}} = Closure,
+            #typeFun{ return = ReturnType0, arguments=[ArgType0] } = FixType,
+            ReturnType = decode_type(ReturnType0),
+            ArgType = decode_type(ArgType0),
+            FunType = decode_type(FixType),
+            emit_closure_struct(ClType),
             {FunctionName,_} = codegen(Lambda),
             StructPointer = compil_table:newTemp(),
-            ClosureTypeName = "clojure_fix",
-            ClosureType = "%" ++ ClosureTypeName ++"*",
 
-            FixName =  "@fix",
+            ClosureType = "%" ++ ClosureTypeName ++ "*",
+            FixName =  "@fix_" ++ Label,
             ValueName = "%fix_value",
             RetValueName = "%fix_ret",
-            FixHeader = ?LIN(["define","i32",FixName,"(i32",ValueName,")"]),
-            FixCall =  ?LIN([RetValueName,"=","call","i32",FunctionName,"(", ClosureType ,StructPointer,
-                    ",","i32",ValueName,")"]),
-            FixReturn = ?LIN(["ret","i32",RetValueName]),
+            FixHeader = ?LIN(["define",ReturnType,FixName,"(",ArgType,ValueName,")"]),
+            FixCall =  ?LIN([RetValueName,"=","call",ReturnType,FunctionName,"(", ClosureType ,StructPointer,
+                    ",",ArgType,ValueName,")"]),
+            FixReturn = ?LIN(["ret",ReturnType,RetValueName]),
 
             ArgTypes = [int],
             ArgsStr = lists:map( fun({Var, Type}) -> decode_type(Type) ++ " " ++  Var end,
                 lists:zip(Vars, ArgTypes)),
             VarString = string:join(ArgsStr,", "),
 
-
             FunctionPointer = compil_table:newTemp(),
             AllocCode = ?LIN([StructPointer,"=","alloca","%" ++ ClosureTypeName]),
             GetFPCode = ?LIN([FunctionPointer,"=","getelementptr",ClosureType,StructPointer++ ",","i32 0,","i32 0"]),
-            StoFPCode = ?LIN(["store","i32(i32)*", FixName ++ "," ,"i32(i32)*" ++ "*",FunctionPointer]),
+            StoFPCode = ?LIN(["store",FunType, FixName ++ "," ,FunType ++ "*",FunctionPointer]),
 
             Code = ?FUNCTION([ FixHeader, AllocCode, GetFPCode, StoFPCode, FixCall, FixReturn]),
             compil_emitter:function(Code),
