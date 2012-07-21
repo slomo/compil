@@ -1,9 +1,6 @@
 #!/bin/sh
 BASEDIR=$(dirname $0)
 
-# compile everything
-erlc *.erl
-
 # append paths
 ERL_PATHS="-pz ${BASEDIR} -pz ${BASEDIR}/lfe"
 

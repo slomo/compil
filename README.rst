@@ -12,6 +12,14 @@ strong typed lisp ddialect into textual llvm ir.
 quickstart
 ----------
 
+Clone and build, build all erlang files:
+
+::
+
+    git clone git://github.com/slomo/compil.git
+    cd compil
+    ./build.sh
+
 Given valid source code is in file code.lisp run:
 
 ::
