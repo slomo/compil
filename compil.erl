@@ -91,27 +91,22 @@ do(String, Pid) ->
 
 
 
-lexAndParse(String) ->
-    {ok, Tokens, _Lines} = lfe_scan:string(String),
-    parseAllForms(Tokens).
-
-parseAllForms(Tokens) ->
-    case lfe_parse:sexpr(Tokens) of
-        {ok, _Count, Tree, []} ->
-            [Tree];
-        {ok, _Count, Tree, Cont} ->
-            [ Tree | parseAllForms(Cont) ]
-    end.
 
 addGlobalEnv() ->
     compil_table:newEnv(global, undefined).
 
 
-%% -- internal implementation -------------------------------------------------
+%% == internal implementation =================================================
 
 %% In the part of the module all basic steps of the compilation process are
 %% implemented in the following code. The modul it self is stateless, but side
 %% effects accour on the symbol table defined in compil_table.
+
+%% -- Records and Types -------------------------------------------------------
+
+%% This is the type of s-expressions, after there where read by the lfe parser
+
+-type s_expr() :: atom() | integer() | [ s_expr() ].
 
 %% Following are most of the record and type definitions used in this project.
 
@@ -180,14 +175,16 @@ addGlobalEnv() ->
         type                :: type_def()
     }).
 
+-type env_ref() :: reference() | global.
 -record(lambda, {
-	  ref                   :: reference(), % unique reference for symbol table
+	  ref                   :: env_ref(), % unique reference for symbol table
       label                 :: string(),    % name in llvm code
       type                  :: #typeFun{},
       definitions           :: #nameDef{},  % names introduced by this functions
       free_vars,                            % { var name, new boundname }
       child                 :: ast()
 	 }).
+
 
 -record(closure,{
         lambda              :: #lambda{},  % anonymous function
@@ -210,13 +207,39 @@ addGlobalEnv() ->
 -type ast() :: #lambda{} | #closure{} | #call{} | #fix{} | #name{} | #literal{}.
 
 
-%% -- the precompiler ---------------------------------------------------------
+%% -- the lfe-parser wrapper ---------------------------------------------------
+%% As mentioned the parser is borrowed from lfe, here a simple wrappe
 
-precompile([ '+' | [ Arg1 | Args ]]) ->
+-spec lexAndParse(string()) -> [ s_expr() ].
+% returns list of all s_expr in that string 
+lexAndParse(String) ->
+    {ok, Tokens, _Lines} = lfe_scan:string(String),
+    parseAllForms(Tokens).
+
+parseAllForms(Tokens) ->
+    case lfe_parse:sexpr(Tokens) of
+        {ok, _Count, Tree, []} ->
+            [Tree];
+        {ok, _Count, Tree, Cont} ->
+            [ Tree | parseAllForms(Cont) ]
+    end.
+
+
+%% -- the precompiler ---------------------------------------------------------
+%% The precompiler makes simple transformations on s-exprs
+
+-spec precompile(s_expr()) -> s_expr().
+
+% for +,-,*,/ fold if there are more that to arguments
+% eg: ( + 1 2 3 ) -> ( + 1 ( + 2 3 ) )
+precompile([ Op | [ Arg1 | Args ]])
+    when Op =:= '+'; Op =:= '-'; Op =:= '/'; Op =:= '*' ->
     lists:foldl(
-        fun(X,Y) ->  [ '+' , Y , precompile(X)] end,
+        fun(X,Y) ->  [ Op , Y , precompile(X)] end,
         precompile(Arg1),
         Args);
+
+% replace let with lambda
 precompile([ 'let' , Definitions, Child]) ->
     { FormalArguments, Parameters } = lists:unzip(lists:map( fun erlang:list_to_tuple/1, Definitions)),
     [
@@ -225,14 +248,24 @@ precompile([ 'let' , Definitions, Child]) ->
             precompile(Child)
         ]
         | lists:map(fun precompile/1, Parameters) ];
+
+% otherwise decent
 precompile(List) when is_list(List) ->
     lists:map(fun  precompile/1,List);
 precompile(Other) ->
     Other.
 
 
-%% renaming of functions
+%% -- the environment analysis.................................................
 
+%% @doc:    Split_env performs the environment analysis. Wich means that all
+%%          lambdas are discovered and entered into the env table, and all names
+%%          are altered so that they are unique. In order to full fill this task,
+%%          split_env, transforms all s-exprs to ast elements (not so clean)
+
+-spec split_env(s_expr(),env_ref()) -> ast().
+
+%% store in env table (with reference to parent), rename all defintions
 split_env([ 'lambda', Definitions, Child], OldEnv) ->
     Ref = make_ref(),
     Prefix = compil_table:newEnv(Ref, OldEnv),
@@ -245,16 +278,19 @@ split_env([ 'lambda', Definitions, Child], OldEnv) ->
     ScannedChild = split_env(Child, Ref),
     #lambda{ ref = Ref, label = Prefix, child = ScannedChild, definitions = ScannedDef };
 
+%% process calls
 split_env([ Function | Arguments], Env) ->
     Target = split_env(Function, Env),
     ScannedArguments = lists:map(fun (Thing) ->  split_env(Thing,Env) end, Arguments),
     #call{ target = Target, arguments = ScannedArguments};
 
+%% litereals: just transform to ast
 split_env(IntLit, _Env) when is_integer(IntLit) ->
     #literal{ type=int, value=IntLit };
 split_env(BoolLit, _Env) when is_boolean(BoolLit) ->
     #literal{ type=bool, value=BoolLit};
 
+%% names: test if buildin or primitv and produce ast, if not get new name
 split_env(Atom, Env) when is_atom(Atom) ->
     case {lists:member(Atom,?BUILDINS),lists:member(Atom,?PRIMOPS)} of
         {false, false}  ->
@@ -264,9 +300,15 @@ split_env(Atom, Env) when is_atom(Atom) ->
             #name{name=Atom, buildin=IsBuildin, primitiv=IsPrimitiv}
     end.
 
+%% no strings jet
 %split_env(StringLit) when is_string(StringLit) ->
 %    #literal{ type=string, value=StringLit };
 
+
+%% @doc:    lookup_name crawls the env table, to find the new name of a
+%%          variable and the environment (lambda) it is defined in.
+
+-spec lookup_name(env_ref(), atom()) ->  { env_ref(), string() }.
 
 lookup_name(Env, Name) ->
     Members  = compil_table:getMembersEnv(Env),
@@ -276,11 +318,17 @@ lookup_name(Env, Name) ->
         none when Env /= global ->
             lookup_name(compil_table:getParentEnv(Env), Name);
         _ ->
-            "Error name not found"
+            throw("Error name not found")
     end.
 
 
-%% free variables analysis
+%% -- The Closure Building ----------------------------------------------------
+
+%% @doc:    scan_free looks for free variables in all lambdas. the information
+%%          gathered in this step is not represented in the ast, it is only
+%%          stored in the env table.
+
+-spec scan_free(ast(), env_ref()) -> done.
 
 scan_free(#lambda{ child=Child, ref=Ref }, _ParentRef) ->
     scan_free(Child, Ref);
@@ -295,6 +343,12 @@ scan_free(#call{ target = Target, arguments = Arguments}, Ref) ->
 scan_free(_Other, _Env) ->
     done.
 
+%% @doc:    while scan_free only looks for names, it calls this method, if it
+%%          has found one. add_free_var goes via the env_table through the env
+%%          and all its parents and marks in that table, wether the name is
+%%          free in that environment
+
+-spec add_free_var(env_ref(), string()) -> done.
 
 add_free_var(Ref,Name) ->
     { _ , Members }  = lists:unzip(compil_table:getMembersEnv(Ref)),
@@ -311,11 +365,16 @@ add_free_var(Ref,Name) ->
     end.
 
 
+%% @doc:    this functions closes all free values, by going through the ast,
+%%          and adding additional formal parameters to lambdas as needed.
+%%          Together with scan_free it performs the lambda lifting algorithm.
 
+-spec close_var(ast()) -> ast().
 
-
-%% close all vars
-
+%% Here direct calls to lambdas are handeled special, that patern accours later
+%% on. It optimises direct calls, but makes handling a lot more complex. The
+%% optimisation is, that no closure is build, so this can be implemented by a
+%% direct llvm call.
 close_var(Call = #call{ target=(Target = #lambda{ ref = Ref, definitions = Defs,
                 child=Child }) , arguments = Args})  ->
     Free = compil_table:getFreeEnv(Ref),
@@ -327,8 +386,13 @@ close_var(Call = #call{ target=(Target = #lambda{ ref = Ref, definitions = Defs,
     Call#call{ target=NewTarget, arguments=NewArguments ++ FreeArguments };
 
 close_var(Call = #call{ arguments = Args, target=Target}) ->
-    Call#call{ target =  close_var(Target), arguments = lists:map( fun close_var/1, Args)};
+    Call#call{
+        target =  close_var(Target),
+        arguments = lists:map( fun close_var/1, Args)
+    };
 
+% If the lambda is not directly called transfrom it into a closure (introduces
+% closure into ast.
 close_var(Lambda = #lambda{ ref=Ref, definitions=Defs, child=Child}) ->
     NewChild = close_var(Child),
     Free = compil_table:getFreeEnv(Ref),
@@ -341,7 +405,11 @@ close_var(Other) ->
     Other.
 
 
-%typing
+%% -- The typeinference -------------------------------------------------------
+%% a not so clever type guessing game
+
+
+-spec type(ast()) -> ast().
 
 type(#closure{lambda=Lambda, captures=Captures} = Closure) ->
     TypedLambda = type(Lambda),
@@ -352,7 +420,7 @@ type(#closure{lambda=Lambda, captures=Captures} = Closure) ->
                 {Def#name{type=Type},Type}
         end, Captures)),
     Closure#closure{ type=#typeCl{
-            name= "clojure_" ++ Lambda#lambda.label,
+            name= "clojure_" ++ Lambda#lambda.label, %closure record name
             lambda = TypedLambda#lambda.type,
             captures=CaptureTypes },
         lambda=TypedLambda, captures=TypedCaptures };
@@ -368,9 +436,17 @@ type(#lambda{definitions = Definitions, child = Child} = Lambda) ->
     MyType = #typeFun{return=extract_type(TypedChild), arguments=ArgTypes},
     Lambda#lambda{definitions=TypedDefinitions, child=TypedChild, type=MyType};
 
-% Test: typing of the fix point
+%% Until now non primitive build ins (like cond and fix) operators underlied
+%% the same rules, but now we must capture calls to them (kind of ugly, next
+%% time i would extract them earlier).
+
+%% typing for fix:
+%%  * guess return type of recursiv function
+%%  * help the type inference for the function
+%%  * name fix it self callable, with type of the function
 type(#call{ target=Target=#name{name=fix }, arguments=[Closure]} = Expr) ->
 
+    % FIXME: i am evil fixed typed code
     #closure{ lambda=Lambda }  = Closure,
     #lambda{ definitions= [ NameDef = #nameDef{ name=SelfReference } | _Other ] } = Lambda,
     Type = #typeCl{
@@ -384,7 +460,11 @@ type(#call{ target=Target=#name{name=fix }, arguments=[Closure]} = Expr) ->
     TypedClosure = type(Closure),
     #fix{ closure=TypedClosure, type=#typeFun{return=int, arguments=[int]}};
 
-
+%% typing for cond:
+%%  * ensure that cond is boolean
+%%  * get type of second expr
+%%  * ensure that third has same type
+%%  * set cond to that type
 type(#call{ target=Target=#name{name='cond' }, arguments=[Cond, Left, Right]} = Expr) ->
     TypedCond = ensure_type(Cond,bool),
     TypedLeft = type(Left),
@@ -393,7 +473,10 @@ type(#call{ target=Target=#name{name='cond' }, arguments=[Cond, Left, Right]} = 
     TypedTarget = Target#name{ type=#typeFun{ arguments = [ bool, ExpectedType, ExpectedType ], return = ExpectedType}},
     Expr#call{ type=ExpectedType, target=TypedTarget, arguments = [ TypedCond, TypedLeft, TypedRight ]};
 
-
+%% generic calls:
+%%  * get expected arguments and return type of the target
+%%  * ensure all arguments are corrected typed
+%%  * set call to return the retrun type of the target
 type(#call{ target=Target, arguments=Arguments} = Call ) ->
     TypedTarget = type(Target),
     case extract_type(TypedTarget) of
@@ -404,16 +487,22 @@ type(#call{ target=Target, arguments=Arguments} = Call ) ->
     end,
     Call#call{ target = TypedTarget, arguments=TypedArguments, type=ReturnType};
 
-
+%% all other buildins have a fixed type
 type(#name{name=Name, buildin=true} = Expr) ->
     Expr#name{type=buildin_type(Name)};
+%% type of name was hopefully findout before
 type(#name{name=Name} = Expr) ->
     Type = compil_table:getType(Name),
     Expr#name{type=Type};
+%% type already set
 type(#literal{} = Lit) ->
     Lit.
 
-% returns arguments with type information
+%% doc: this is helper for typing calls, that checks, wether the expectation of
+%%      of the call target are meet by the given args.
+
+-spec type_check_args(ast(),type_def()) -> [ast()].
+
 type_check_args(Got, Expected) ->
     length(Got) == length(Expected) orelse throw(invalid_number_of_arguements),
     lists:map(
@@ -422,6 +511,12 @@ type_check_args(Got, Expected) ->
                 ensure_type(Argument, ExpectedType)
         end,lists:zip(Got, Expected)).
 
+%% doc: ensure_type is a special kind of type function, it not only guesses
+%%      types, it also sets types for variables, if they havent already one,
+%%      and throws an exception if types do not match. It is the core of type
+%%      inference.
+
+-spec ensure_type(ast(),type_def()) -> ast().
 
 ensure_type(Expr = #name{ name=Name },Type) ->
     case compil_table:getType(Name) of
@@ -436,6 +531,11 @@ ensure_type(Expr, Type) ->
     Type = extract_type(TypedExpr),
     TypedExpr.
 
+%% doc: extract_type is helper, that simply unpacks the type of various ast
+%%      elements.
+
+-spec extract_type(ast()) ->  type_def().
+
 extract_type(#call{ type = Type}) -> Type;
 extract_type(#name{type = Type}) -> Type;
 extract_type(#literal{type = Type}) -> Type;
@@ -444,9 +544,12 @@ extract_type(#closure{ type= Type}) -> Type;
 extract_type(#fix{ type= Type}) -> Type.
 
 
-% @doc: show which type may be mapped to int
-%conversions(int,float) ->
-%    float.
+%% doc: buildin_type shows wich types are expected by builins (mostly
+%%      primitives). Since there is no float yet this is easy. Then we
+%%      need more complex type inference. Also this function should be
+%%      renamed to primitive_type.
+
+-spec buildin_type(primitive_operator()) -> type_def().
 
 buildin_type(OP) ->
     case
@@ -461,13 +564,33 @@ buildin_type(OP) ->
             #typeFun{arguments=[int, int], return=int}
     end.
 
+%% -- The LLVM IR Generator ---------------------------------------------------
+%% This is by far the ugliest code of the compiler. It cloud be improved by
+%% seperating out routines for llvm genereation. But I had not enough time.
 
+
+%% These are some little helpers defined as macros. God know why I choose macros
+%% to do this. They help for some basic tasks when emitting code.
 -define(NOCODE,[]).
+% since there is alread a std. macro named line I had to rename this fellow
 -define(LIN(Tokens), string:join(Tokens," ")).
 -define(FUNCTION(Lines), hd(Lines) ++ "{\n\t" ++ string:join(tl(Lines),"\n\t") ++ "\n}\n").
 -define(LABEL(Name),"\n" ++ tl(Name) ++ ":").
 
-% code gen for the known  type
+
+%% doc: expcept for a handfull of helpers this is the only function for code
+%%      generation, and it is a monster. It takes a ast node and transforms it
+%%      to code. If needed the code is sent to the emitter (record types and
+%%      completed inner functions). It returns the llvm var name, that holds
+%%      the result of the evaluation of the ast, and code fragments to compute
+%%      this result in reversed order (because appeding at the end of lists,
+%%      is inefficient).
+
+-spec codegen(ast()) -> {string(), [string()]}. % { varname, codefragements }
+
+%% generate function code
+%%  * emit global llvm function ( there are only global function in llvm)
+%%  * return only name of that function
 codegen(#lambda{label = Label, definitions=Defs, child = Child}) ->
     RetType = edt(Child),
     Arguments = lists:map(
@@ -478,10 +601,9 @@ codegen(#lambda{label = Label, definitions=Defs, child = Child}) ->
     ReturnLine = ?LIN(["ret", RetType, ChildVar]),
     Code = ?FUNCTION([ HeaderLine | lists:reverse(ChildLines) ] ++ [ ReturnLine ]),
     compil_emitter:function(Code),
-    {"@" ++ Label,""};
+    {"@" ++ Label,?NOCODE};
 
-
-
+%% standard if-then-else style code
 codegen(#call{ target=Target=#name{name='cond' }, arguments=[Cond, Left, Right]}) ->
     {CondVar, CondCodes } = codegen(Cond),
     {TrueVar, TrueCodes } = codegen(Left),
@@ -511,18 +633,22 @@ codegen(#call{ target=Target=#name{name='cond' }, arguments=[Cond, Left, Right]}
             [ StoreTrueCode | [ContinueCode | [LabelFalseCode | lists:reverse(FalseCodes)]]] ++
             [StoreFalseCode, ContinueCode,  LabelContinueCode, LoadCode ])};
 
-
+%% calls are handeled in one clause with cases
 codegen(#call{ type=RetType, target = Target,  arguments = Args }) ->
 
+    %% common stuff for calls to all targets  (produce code for args)
     CodeArgs = lists:map(fun(Arg) ->  codegen(Arg) end, Args),
     {Vars, ArgCodes}  = lists:unzip(CodeArgs),
     ArgCodeLines =  lists:concat(ArgCodes),
     case Target of
+        %% calls to build in primitives
         #name{ name=Primitiv, primitiv=true } ->
             MyVar = compil_table:newTemp(),
             [VarA, VarB] = Vars,
             MyOp = ?LIN([MyVar,"=", decode(Primitiv), edt(hd(Args)), VarA,",",VarB]),
             {MyVar, [ MyOp | ArgCodeLines ]};
+
+        %% direct calls to lambdas (more efficient than producing a closure)
         #lambda{ type=#typeFun {arguments=ArgTypes} } = Lambda ->
             {LambdaVar, _ } = codegen(Lambda),
             MyVar = compil_table:newTemp(),
@@ -531,41 +657,43 @@ codegen(#call{ type=RetType, target = Target,  arguments = Args }) ->
             MyCall = ?LIN([MyVar,"=","call",decode_type(RetType), LambdaVar, "(", VarString ,")"]),
             {MyVar, [ MyCall | ArgCodeLines ]};
 
-    #fix{ closure=Closure } ->
-        #closure{ lambda = Lambda =  #lambda{ type=Type}} = Closure,
-        {FunctionName,_} = codegen(Lambda),
-        StructPointer = compil_table:newTemp(),
-        ClosureTypeName = "clojure_fix",
-        ClosureType = "%" ++ ClosureTypeName ++"*",
+        %% call to fix point operators (complex stuff ;)
+        #fix{ closure=Closure } ->
+            #closure{ lambda = Lambda =  #lambda{ type=Type}} = Closure,
+            {FunctionName,_} = codegen(Lambda),
+            StructPointer = compil_table:newTemp(),
+            ClosureTypeName = "clojure_fix",
+            ClosureType = "%" ++ ClosureTypeName ++"*",
 
-        FixName =  "@fix",
-        ValueName = "%fix_value",
-        RetValueName = "%fix_ret",
-        FixHeader = ?LIN(["define","i32",FixName,"(i32",ValueName,")"]),
-        FixCall =  ?LIN([RetValueName,"=","call","i32",FunctionName,"(", ClosureType ,StructPointer,
-                ",","i32",ValueName,")"]),
-        FixReturn = ?LIN(["ret","i32",RetValueName]),
+            FixName =  "@fix",
+            ValueName = "%fix_value",
+            RetValueName = "%fix_ret",
+            FixHeader = ?LIN(["define","i32",FixName,"(i32",ValueName,")"]),
+            FixCall =  ?LIN([RetValueName,"=","call","i32",FunctionName,"(", ClosureType ,StructPointer,
+                    ",","i32",ValueName,")"]),
+            FixReturn = ?LIN(["ret","i32",RetValueName]),
 
-        ArgTypes = [int],
-        ArgsStr = lists:map( fun({Var, Type}) -> decode_type(Type) ++ " " ++  Var end,
-            lists:zip(Vars, ArgTypes)),
-        VarString = string:join(ArgsStr,", "),
-
-
-        FunctionPointer = compil_table:newTemp(),
-        AllocCode = ?LIN([StructPointer,"=","alloca","%" ++ ClosureTypeName]),
-        GetFPCode = ?LIN([FunctionPointer,"=","getelementptr",ClosureType,StructPointer++ ",","i32 0,","i32 0"]),
-        StoFPCode = ?LIN(["store","i32(i32)*", FixName ++ "," ,"i32(i32)*" ++ "*",FunctionPointer]),
-
-        Code = ?FUNCTION([ FixHeader, AllocCode, GetFPCode, StoFPCode, FixCall, FixReturn]),
-        compil_emitter:function(Code),
-
-        MyVar = compil_table:newTemp(),
-        MyCall = ?LIN([MyVar,"=","call",decode_type(RetType), FixName, "(", VarString ,")"]),
-        {MyVar, [ MyCall | ArgCodeLines ]};
+            ArgTypes = [int],
+            ArgsStr = lists:map( fun({Var, Type}) -> decode_type(Type) ++ " " ++  Var end,
+                lists:zip(Vars, ArgTypes)),
+            VarString = string:join(ArgsStr,", "),
 
 
-        Other -> % callee must be a closure
+            FunctionPointer = compil_table:newTemp(),
+            AllocCode = ?LIN([StructPointer,"=","alloca","%" ++ ClosureTypeName]),
+            GetFPCode = ?LIN([FunctionPointer,"=","getelementptr",ClosureType,StructPointer++ ",","i32 0,","i32 0"]),
+            StoFPCode = ?LIN(["store","i32(i32)*", FixName ++ "," ,"i32(i32)*" ++ "*",FunctionPointer]),
+
+            Code = ?FUNCTION([ FixHeader, AllocCode, GetFPCode, StoFPCode, FixCall, FixReturn]),
+            compil_emitter:function(Code),
+
+            MyVar = compil_table:newTemp(),
+            MyCall = ?LIN([MyVar,"=","call",decode_type(RetType), FixName, "(", VarString ,")"]),
+            {MyVar, [ MyCall | ArgCodeLines ]};
+
+        %% calls to other objects ( names, results of other calls etc)
+        Other ->
+            %% target mus be a closure
             ClType = #typeCl{ lambda=FunType = #typeFun{ arguments=ArgTypes }, captures=CaptureTypes } = extract_type(Other),
             { StructPointer, PrevCodes} = codegen(Other),
 
@@ -601,10 +729,11 @@ codegen(#call{ type=RetType, target = Target,  arguments = Args }) ->
 
     end;
 
+%% var names have already been transformed
 codegen(#name{ name=Var}) ->
     { "%" ++ Var, ?NOCODE};
 
-
+%% produce code for the definiton of closure ( capture environment etc ...)
 codegen(#closure{ lambda = Lambda = #lambda { type=FunType },type = ClType,  captures= Captures}) ->
     { FunctionName, _ } = codegen(Lambda),
     % Typedef := { Pointer to Function, Number of Bindings, Binding }
@@ -638,7 +767,7 @@ codegen(#closure{ lambda = Lambda = #lambda { type=FunType },type = ClType,  cap
 
 
 
-
+%% handle literals
 codegen(#literal{type=int, value=Val}) ->
     MyVar = integer_to_list(Val),
     {MyVar, ?NOCODE};
@@ -651,17 +780,32 @@ codegen(#literal{type=bool, value=Val}) ->
     end,
     {MyVar, ?NOCODE}.
 
+%% @doc emit a closure struct, that can be stored on the heap later.
+%%      BEWARE: evil side effects!!
+
+-spec emit_closure_struct(#typeCl{}) -> done.
+
 emit_closure_struct(#typeCl{ name=ClosureTypeName, lambda=TypeFun, captures=CaptureTypes }) ->
     ArgTypes = lists:map(fun decode_type/1,CaptureTypes),
     FunString = string:join([decode_type(TypeFun) | ArgTypes],", "),
-    compil_emitter:function(?LIN(["%" ++ ClosureTypeName,"=","type","{",FunString,"}"])).
+    compil_emitter:function(?LIN(["%" ++ ClosureTypeName,"=","type","{",FunString,"}"])),
+    done.
+
+%% @doc genereatre a main method from all top level code fragments
+
+-spec maingen([{string(),[string()]}]) -> string().
 
 maingen(Exprs) ->
     Final = lists:last(Exprs),
+
+    % these are just emitted for thier side effects, but we have no side effects
+    % sense is questionabel
     {_, Code} = lists:unzip(Exprs),
     Lines = lists:concat(lists:map(fun lists:reverse/1, Code)),
     {FinalVar, FinalCode} = Final,
-    RetType = decode_type(int), % defined to be int, other make no sense
+
+    % other return types than int make no sense
+    RetType = decode_type(int),
 
     ?FUNCTION(
             [ ?LIN([ "define", RetType, "@main", "()"]) | Lines ] ++
@@ -669,9 +813,10 @@ maingen(Exprs) ->
     ).
 
 
-edt(Expr) -> decode_type(extract_type(Expr)).
+% @doc: a bunch of helpers, that trans forms compiler internal structure 1:1
+%       to llvm representations.
 
-
+-spec decode(primitive_operator) -> string().
 
 decode('+') -> "add";
 decode('/') -> "div";
@@ -683,9 +828,15 @@ decode('=') -> "icmp eq";
 decode('<') -> "icmp slt";
 decode('>') -> "icmp sgt".
 
-% Types
+-spec decode_type(type_def()) -> string().
+
 decode_type(#typeFun{return=Return,arguments=Args}) ->
     decode_type(Return) ++ "(" ++ string:join(lists:map(fun decode_type/1, Args),", ") ++ ")*";
 decode_type(#typeCl{ name=Name}) -> "%" ++ Name ++ "*";
 decode_type(bool) -> "i1";
 decode_type(int) -> "i32".
+
+% shortcut
+
+-spec edt(ast()) -> string().
+edt(Expr) -> decode_type(extract_type(Expr)).
