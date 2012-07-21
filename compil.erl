@@ -147,6 +147,10 @@ do(String, Pid) ->
         captures =[]        :: [ type_def() ]
     }).
 
+-record(typeMaybe,{
+        options = []
+    }).
+
 -type basic_type_def() :: int | bool.
 -type type_def() :: basic_type_def() | #typeFun{} | #typeCl{}.
 
@@ -447,7 +451,8 @@ type(#lambda{definitions = Definitions, child = Child} = Lambda) ->
 %%  * help the type inference for the function
 %%  * name fix it self callable, with type of the function
 type(#call{ target=Target=#name{name=fix }, arguments=[Closure]} = Expr) ->
-
+    type(Closure),
+    %io:fwrite("--------"),
     % FIXME: i am evil fixed typed code
     #closure{ lambda=Lambda }  = Closure,
     #lambda{ definitions= [ NameDef = #nameDef{ name=SelfReference } | _Other ] } = Lambda,
@@ -486,6 +491,9 @@ type(#call{ target=Target, arguments=Arguments} = Call ) ->
             TypedArguments = type_check_args(Arguments, ExpectedArgTypes);
         #typeCl{ captures=CaptureTypes, lambda = #typeFun{ return=ReturnType, arguments=ExpectedArgTypes} } ->
             TypedArguments = type_check_args(Arguments, lists:subtract(ExpectedArgTypes, CaptureTypes))
+        ;undefined ->
+            ReturnType = undefined,
+            TypedArguments = Arguments
     end,
     Call#call{ target = TypedTarget, arguments=TypedArguments, type=ReturnType};
 
@@ -494,7 +502,9 @@ type(#name{name=Name, buildin=true} = Expr) ->
     Expr#name{type=buildin_type(Name)};
 %% type of name was hopefully findout before
 type(#name{name=Name} = Expr) ->
+    io:fwrite("name: ~p~n",[Name]),
     Type = compil_table:getType(Name),
+    io:fwrite("done: ~p => ~p~n",[Type,Name]),
     Expr#name{type=Type};
 %% type already set
 type(#literal{} = Lit) ->
@@ -565,6 +575,26 @@ buildin_type(OP) ->
         { _, _, true} ->
             #typeFun{arguments=[int, int], return=int}
     end.
+
+
+%type_wrap(Expr) ->
+%    try type(Expr)
+%    catch
+%        _all -> unknown
+%    end.
+%
+%guess_type(#call{ target='cond', arguments= [_, Left, Right] }) ->
+%    case { type_wrap(Left), type_wrap(Right) } of
+%        { unknown, unknown } ->
+%        { A, unkown } ->
+%            extract_type(A);
+%        { _, B} ->
+%            extract_type(B)
+%    end;
+%
+%guess_type(#call{ target=Target } = Call) ->
+%    case type_wrap(Target)
+%
 
 %% -- The LLVM IR Generator ---------------------------------------------------
 %% This is by far the ugliest code of the compiler. It cloud be improved by
